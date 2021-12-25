@@ -1,7 +1,7 @@
 ﻿''''' DiskDevice.vb
 ''''' Class for controlling Arsenal Image Mounter Disk Devices.
 ''''' 
-''''' Copyright (c) 2012-2020, Arsenal Consulting, Inc. (d/b/a Arsenal Recon) <http://www.ArsenalRecon.com>
+''''' Copyright (c) 2012-2021, Arsenal Consulting, Inc. (d/b/a Arsenal Recon) <http://www.ArsenalRecon.com>
 ''''' This source code and API are available under the terms of the Affero General Public
 ''''' License v3.
 '''''
@@ -10,8 +10,12 @@
 ''''' Questions, comments, or requests for clarification: http://ArsenalRecon.com/contact/
 '''''
 
+Imports System.ComponentModel
+Imports System.IO
+Imports System.Runtime.InteropServices
+Imports System.Threading
 Imports Arsenal.ImageMounter.IO
-
+Imports Microsoft.Win32.SafeHandles
 
 ''' <summary>
 ''' Represents disk objects, attached to a virtual or physical SCSI adapter.
@@ -22,7 +26,7 @@ Public Class DiskDevice
     Private _RawDiskStream As DiskStream
 
     Private _CachedAddress As NativeFileIO.SCSI_ADDRESS?
-    '
+
     ''' <summary>
     ''' Returns the device path used to open this device object, if opened by name.
     ''' If the object was opened in any other way, such as by supplying an already
@@ -31,7 +35,14 @@ Public Class DiskDevice
     Public ReadOnly Property DevicePath As String
 
     Private Sub AllowExtendedDasdIo()
-        NativeFileIO.UnsafeNativeMethods.DeviceIoControl(SafeFileHandle, NativeFileIO.NativeConstants.FSCTL_ALLOW_EXTENDED_DASD_IO, IntPtr.Zero, 0UI, IntPtr.Zero, 0UI, 0UI, IntPtr.Zero)
+        If Not NativeFileIO.UnsafeNativeMethods.DeviceIoControl(SafeFileHandle, NativeFileIO.NativeConstants.FSCTL_ALLOW_EXTENDED_DASD_IO, IntPtr.Zero, 0UI, IntPtr.Zero, 0UI, 0UI, IntPtr.Zero) Then
+            Dim errcode = Marshal.GetLastWin32Error()
+            If errcode <> NativeFileIO.NativeConstants.ERROR_INVALID_PARAMETER AndAlso
+                errcode <> NativeFileIO.NativeConstants.ERROR_INVALID_FUNCTION Then
+
+                Trace.WriteLine($"FSCTL_ALLOW_EXTENDED_DASD_IO failed for '{_DevicePath}': {errcode}")
+            End If
+        End If
     End Sub
 
     Protected Friend Sub New(DeviceNameAndHandle As KeyValuePair(Of String, SafeFileHandle), AccessMode As FileAccess)
@@ -80,7 +91,7 @@ Public Class DiskDevice
     End Sub
 
     ''' <summary>
-    ''' Retrieves device number for this disk.
+    ''' Retrieves device number for this disk on the owner SCSI adapter.
     ''' </summary>
     Public ReadOnly Property DeviceNumber As UInt32
         Get
@@ -113,6 +124,24 @@ Public Class DiskDevice
     Public ReadOnly Property StorageDeviceNumber As NativeFileIO.STORAGE_DEVICE_NUMBER?
         Get
             Return NativeFileIO.GetStorageDeviceNumber(SafeFileHandle)
+        End Get
+    End Property
+
+    ''' <summary>
+    ''' Retrieves StorageStandardProperties information.
+    ''' </summary>
+    Public ReadOnly Property StorageStandardProperties As NativeFileIO.StorageStandardProperties?
+        Get
+            Return NativeFileIO.GetStorageStandardProperties(SafeFileHandle)
+        End Get
+    End Property
+
+    ''' <summary>
+    ''' Retrieves TRIM enabled information.
+    ''' </summary>
+    Public ReadOnly Property TrimEnabled As Boolean?
+        Get
+            Return NativeFileIO.GetStorageTrimProperties(SafeFileHandle)
         End Get
     End Property
 
@@ -349,6 +378,11 @@ Public Class DiskDevice
         NativeFileIO.InitializeDisk(SafeFileHandle, PartitionStyle)
     End Sub
 
+    ''' <summary>
+    ''' Disk identifier string.
+    ''' </summary>
+    ''' <returns>8 digit hex string for MBR disks or disk GUID for
+    ''' GPT disks.</returns>
     Public ReadOnly Property DiskId As String
         Get
             Return If(DriveLayoutEx?.ToString(), "(Unknown)")
@@ -367,12 +401,12 @@ Public Class DiskDevice
     ''' <param name="Flags">Flags specifying properties for virtual disk. See comments for each flag value.</param>
     ''' <param name="Filename">Name of disk image file holding storage for file type virtual disk or used to create a
     ''' virtual memory type virtual disk.</param>
-    Public Sub QueryDevice(ByRef DeviceNumber As UInt32,
-                           ByRef DiskSize As Int64,
-                           ByRef BytesPerSector As UInt32,
-                           ByRef ImageOffset As Int64,
-                           ByRef Flags As DeviceFlags,
-                           ByRef Filename As String)
+    Public Sub QueryDevice(<Out> ByRef DeviceNumber As UInt32,
+                           <Out> ByRef DiskSize As Int64,
+                           <Out> ByRef BytesPerSector As UInt32,
+                           <Out> ByRef ImageOffset As Int64,
+                           <Out> ByRef Flags As DeviceFlags,
+                           <Out> ByRef Filename As String)
 
         Dim scsi_address = ScsiAddress.Value
 
@@ -404,13 +438,13 @@ Public Class DiskDevice
     ''' <param name="Filename">Name of disk image file holding storage for file type virtual disk or used to create a
     ''' virtual memory type virtual disk.</param>
     ''' <param name="WriteOverlayImagefile">Path to differencing file used in write-temporary mode.</param>
-    Public Sub QueryDevice(ByRef DeviceNumber As UInt32,
-                           ByRef DiskSize As Int64,
-                           ByRef BytesPerSector As UInt32,
-                           ByRef ImageOffset As Int64,
-                           ByRef Flags As DeviceFlags,
-                           ByRef Filename As String,
-                           ByRef WriteOverlayImagefile As String)
+    Public Sub QueryDevice(<Out> ByRef DeviceNumber As UInt32,
+                           <Out> ByRef DiskSize As Int64,
+                           <Out> ByRef BytesPerSector As UInt32,
+                           <Out> ByRef ImageOffset As Int64,
+                           <Out> ByRef Flags As DeviceFlags,
+                           <Out> ByRef Filename As String,
+                           <Out> ByRef WriteOverlayImagefile As String)
 
         Dim scsi_address = ScsiAddress.Value
 
@@ -512,6 +546,22 @@ Public Class DiskDevice
 
     End Sub
 
+#If NET45_OR_GREATER OrElse NETCOREAPP OrElse NETSTANDARD Then
+    ''' <summary>
+    ''' Locks and dismounts filesystem on a volume. Upon successful return, further access to the device
+    ''' can only be done through this device object instance until it is either closed (disposed) or lock is
+    ''' released on the underlying handle.
+    ''' </summary>
+    ''' <param name="Force">Indicates if True that volume should be immediately dismounted even if it
+    ''' cannot be locked. This causes all open handles to files on the volume to become invalid. If False,
+    ''' successful lock (no other open handles) is required before attempting to dismount filesystem.</param>
+    Public Async Function DismountVolumeFilesystemAsync(Force As Boolean, cancel As CancellationToken) As Task
+
+        NativeFileIO.Win32Try(Await NativeFileIO.DismountVolumeFilesystemAsync(SafeFileHandle, Force, cancel).ConfigureAwait(continueOnCapturedContext:=False))
+
+    End Function
+#End If
+
     ''' <summary>
     ''' Get live statistics from write filter driver.
     ''' </summary>
@@ -528,6 +578,18 @@ Public Class DiskDevice
     End Property
 
     ''' <summary>
+    ''' Deletes the write overlay image file after use. Also sets the filter driver to
+    ''' silently ignore flush requests to improve performance when integrity of the write
+    ''' overlay image is not needed for future sessions.
+    ''' </summary>
+    Public Sub SetWriteOverlayDeleteOnClose()
+        Dim rc = API.SetWriteOverlayDeleteOnClose(SafeFileHandle)
+        If rc <> NativeFileIO.NativeConstants.NO_ERROR Then
+            Throw New Win32Exception(rc)
+        End If
+    End Sub
+
+    ''' <summary>
     ''' Returns an DiskStream object that can be used to directly access disk data.
     ''' </summary>
     Public Function GetRawDiskStream() As DiskStream
@@ -535,7 +597,8 @@ Public Class DiskDevice
         If _RawDiskStream Is Nothing Then
 
             _RawDiskStream = New DiskStream(SafeFileHandle,
-                                            If(AccessMode = 0, FileAccess.Read, AccessMode))
+                                            If(AccessMode = 0, FileAccess.Read, AccessMode),
+                                            bufferSize:=If(Geometry?.BytesPerSector, 512))
 
         End If
 

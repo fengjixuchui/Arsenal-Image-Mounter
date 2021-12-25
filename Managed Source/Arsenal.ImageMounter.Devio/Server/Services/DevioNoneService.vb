@@ -1,6 +1,6 @@
 ﻿''''' DevioNoneService.vb
 ''''' 
-''''' Copyright (c) 2012-2020, Arsenal Consulting, Inc. (d/b/a Arsenal Recon) <http://www.ArsenalRecon.com>
+''''' Copyright (c) 2012-2021, Arsenal Consulting, Inc. (d/b/a Arsenal Recon) <http://www.ArsenalRecon.com>
 ''''' This source code and API are available under the terms of the Affero General Public
 ''''' License v3.
 '''''
@@ -9,9 +9,11 @@
 ''''' Questions, comments, or requests for clarification: http://ArsenalRecon.com/contact/
 '''''
 
+Imports System.IO
 Imports Arsenal.ImageMounter.Devio.Server.GenericProviders
 Imports Arsenal.ImageMounter.Devio.Server.Interaction
 Imports Arsenal.ImageMounter.IO
+Imports DiscUtils
 
 Namespace Server.Services
 
@@ -124,6 +126,7 @@ Namespace Server.Services
         ''' </summary>
         ''' <returns>Fixed value of True.</returns>
         Public Overrides Function StartServiceThread() As Boolean
+            RunService()
             Return True
         End Function
 

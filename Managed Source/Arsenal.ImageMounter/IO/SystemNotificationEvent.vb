@@ -1,7 +1,7 @@
 ﻿''''' SystemNotificationEvent.vb
 ''''' Represents a system notification event object. Well known paths are available as constants of SystemNotificationEvent class.
 ''''' 
-''''' Copyright (c) 2012-2020, Arsenal Consulting, Inc. (d/b/a Arsenal Recon) <http://www.ArsenalRecon.com>
+''''' Copyright (c) 2012-2021, Arsenal Consulting, Inc. (d/b/a Arsenal Recon) <http://www.ArsenalRecon.com>
 ''''' This source code and API are available under the terms of the Affero General Public
 ''''' License v3.
 '''''
@@ -9,6 +9,9 @@
 ''''' proprietary exceptions.
 ''''' Questions, comments, or requests for clarification: http://ArsenalRecon.com/contact/
 '''''
+
+Imports System.Security.AccessControl
+Imports System.Threading
 
 Namespace IO
     ''' <summary>
@@ -23,7 +26,7 @@ Namespace IO
         ''' <param name="EventName">NT name and path to event to open</param>
         Public Sub New(EventName As String)
 
-            SafeWaitHandle = NativeFileIO.NtOpenEvent(EventName, 0, NativeFileIO.NativeConstants.SYNCHRONIZE Or NativeFileIO.NativeConstants.EVENT_QUERY_STATE, Nothing)
+            SafeWaitHandle = NativeFileIO.NtOpenEvent(EventName, 0, FileSystemRights.Synchronize Or NativeFileIO.NativeConstants.EVENT_QUERY_STATE, Nothing)
 
         End Sub
 

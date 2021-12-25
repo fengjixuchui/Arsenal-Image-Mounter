@@ -1,6 +1,6 @@
 ﻿''''' DevioServiceBase.vb
 ''''' 
-''''' Copyright (c) 2012-2020, Arsenal Consulting, Inc. (d/b/a Arsenal Recon) <http://www.ArsenalRecon.com>
+''''' Copyright (c) 2012-2021, Arsenal Consulting, Inc. (d/b/a Arsenal Recon) <http://www.ArsenalRecon.com>
 ''''' This source code and API are available under the terms of the Affero General Public
 ''''' License v3.
 '''''
@@ -9,6 +9,9 @@
 ''''' Questions, comments, or requests for clarification: http://ArsenalRecon.com/contact/
 '''''
 
+Imports System.ComponentModel
+Imports System.IO
+Imports System.Threading
 Imports Arsenal.ImageMounter.Devio.Server.GenericProviders
 Imports Arsenal.ImageMounter.Extensions
 Imports Arsenal.ImageMounter.IO
@@ -179,8 +182,8 @@ Namespace Server.Services
         Public Overridable Function StartServiceThread() As Boolean
 
             Using _
-                ServiceReadyEvent As New EventWaitHandle(initialState:=False, mode:=EventResetMode.ManualReset),
-                ServiceInitFailedEvent As New EventWaitHandle(initialState:=False, mode:=EventResetMode.ManualReset)
+                ServiceReadyEvent As New ManualResetEvent(initialState:=False),
+                ServiceInitFailedEvent As New ManualResetEvent(initialState:=False)
 
                 Dim ServiceReadyHandler As New EventHandler(Sub() ServiceReadyEvent.Set())
                 AddHandler ServiceReady, ServiceReadyHandler
@@ -469,6 +472,18 @@ Namespace Server.Services
         ''' </summary>
         Public Overridable Function GetDiskDeviceName() As String Implements IVirtualDiskService.GetDiskDeviceName
             Return _ScsiAdapter.GetDeviceName(DiskDeviceNumber)
+        End Function
+
+        ''' <summary>
+        ''' Deletes the write overlay image file after use. Also sets this filter driver to
+        ''' silently ignore flush requests to improve performance when integrity of the write
+        ''' overlay image is not needed for future sessions.
+        ''' </summary>
+        ''' <returns>Returns 0 on success or Win32 error code on failure</returns>
+        Public Function SetWriteOverlayDeleteOnClose() As Integer
+            Using disk = OpenDiskDevice(FileAccess.ReadWrite)
+                Return API.SetWriteOverlayDeleteOnClose(disk.SafeFileHandle)
+            End Using
         End Function
 
         ''' <summary>

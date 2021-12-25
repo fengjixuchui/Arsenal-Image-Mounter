@@ -444,6 +444,34 @@ AIMWrFltrDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         return STATUS_PENDING;
     }
 
+    case IOCTL_AIMWRFLTR_DELETE_ON_CLOSE:
+    {
+        FILE_DISPOSITION_INFORMATION file_dispose = { TRUE };
+
+        status = ZwSetInformationFile(device_extension->DiffDeviceHandle,
+            &Irp->IoStatus, &file_dispose, sizeof(file_dispose),
+            FileDispositionInformation);
+
+        if (!NT_SUCCESS(status))
+        {
+            DbgPrint("AIMWrFltr:DeviceControl: IOCTL_AIMWRFLTR_DELETE_ON_CLOSE: Error setting disposition flag for diff device: 0x%X\n",
+                status);
+
+            IoCompleteRequest(Irp, IO_NO_INCREMENT);
+            return status;
+        }
+
+        device_extension->Statistics.IgnoreFlushBuffers = TRUE;
+
+        KdPrint(("AIMWrFltr:DeviceControl: IOCTL_AIMWRFLTR_DELETE_ON_CLOSE: Disposition flag set for diff device.\n"));
+
+        status = STATUS_SUCCESS;
+
+        Irp->IoStatus.Status = status;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return status;
+    }
+
     case IOCTL_DISK_COPY_DATA:
     {
         if (device_extension->Statistics.IsProtected)
@@ -645,6 +673,8 @@ AIMWrFltrDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         }
         else if (device_extension->Statistics.IsProtected)
         {
+            KdPrint(("AIMWrFltr:DeviceControl: IOCTL_DISK_IS_WRITABLE for protected but not yet initialized device\n"));
+
             status = STATUS_DEVICE_NOT_READY;
 
             Irp->IoStatus.Status = status;
@@ -660,12 +690,20 @@ AIMWrFltrDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 
     case IOCTL_SCSI_MINIPORT:
     case IOCTL_ATA_MINIPORT:
+#ifdef IOCTL_DISK_VOLUMES_ARE_READY
+    case IOCTL_DISK_VOLUMES_ARE_READY:
+#endif
     {
         return AIMWrFltrSendToNextDriver(DeviceObject, Irp);
     }
 
     case IOCTL_SCSI_PASS_THROUGH_DIRECT:
     {
+        if (device_extension->Statistics.IsProtected)
+        {
+            return AIMWrFltrSendToNextDriver(DeviceObject, Irp);
+        }
+
         if (io_stack->Parameters.DeviceIoControl.InputBufferLength >= sizeof(SCSI_PASS_THROUGH_DIRECT))
         {
             PSCSI_PASS_THROUGH_DIRECT pSrb = (PSCSI_PASS_THROUGH_DIRECT)Irp->AssociatedIrp.SystemBuffer;
@@ -700,6 +738,16 @@ AIMWrFltrDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             }
 #endif
         }
+        else
+        {
+            KdPrint(("AIMWrFltr:DeviceControl: Bad formatted IOCTL_SCSI_PASS_THROUGH_DIRECT sent to protected disk.\n"));
+        }
+
+        status = STATUS_INVALID_DEVICE_REQUEST;
+
+        Irp->IoStatus.Status = status;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return status;
     }
 
     default:
@@ -715,8 +763,12 @@ AIMWrFltrDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
                     io_stack->Parameters.DeviceIoControl.IoControlCode) ==
                 IOCTL_STORAGE_BASE))
         {
-            KdPrint(("AIMWrFltr:DeviceControl: Destructive direct IOCTL %#x access to disk with protected disk.\n",
-                io_stack->Parameters.DeviceIoControl.IoControlCode));
+            KdPrint(("AIMWrFltr:DeviceControl: Destructive direct IOCTL %#x CTL_CODE(%s, %s, %s, %s) access to disk with protected disk\n",
+                io_stack->Parameters.DeviceIoControl.IoControlCode,
+                AIMWrFltrGetIoctlDeviceTypeName(io_stack->Parameters.DeviceIoControl.IoControlCode),
+                AIMWrFltrGetIoctlFunctionName(io_stack->Parameters.DeviceIoControl.IoControlCode),
+                AIMWrFltrGetIoctlMethodName(io_stack->Parameters.DeviceIoControl.IoControlCode),
+                AIMWrFltrGetIoctlAccessName(io_stack->Parameters.DeviceIoControl.IoControlCode)));
 
             status = STATUS_INVALID_DEVICE_REQUEST;
 
@@ -725,35 +777,53 @@ AIMWrFltrDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             return status;
         }
 
-        if (IOCTL_STORAGE_QUERY_PROPERTY ==
-            io_stack->Parameters.DeviceIoControl.IoControlCode)
+        if (device_extension->Statistics.FakeNonRemovable &&
+            io_stack->Parameters.DeviceIoControl.IoControlCode == IOCTL_STORAGE_QUERY_PROPERTY &&
+            io_stack->Parameters.DeviceIoControl.InputBufferLength >= sizeof(STORAGE_PROPERTY_QUERY))
         {
-#if 0
             PSTORAGE_PROPERTY_QUERY query = (PSTORAGE_PROPERTY_QUERY)
                 Irp->AssociatedIrp.SystemBuffer;
 
             KdPrint(("AIMWrFltr:DeviceControl: IOCTL_STORAGE_QUERY_PROPERTY QueryType=%i, PropertyId=%i.\n",
                 query->QueryType, query->PropertyId));
 
-            if (query->PropertyId > StorageDeviceWriteAggregationProperty)
+            if (query->PropertyId == StorageDeviceProperty)
             {
-                KdPrint(("AIMWrFltr:DeviceControl: Too high IOCTL_STORAGE_QUERY_PROPERTY id requested. Requested %i, max supported %i.\n",
-                    (int)query->PropertyId,
-                    (int)StorageDeviceWriteAggregationProperty));
+                KdPrint(("AIMWrFltr:DeviceControl: StorageDeviceProperty, requesting physical properties.\n"));
+                
+                status = AIMWrFltrForwardIrpSynchronous(DeviceObject, Irp);
 
-                status = STATUS_INVALID_DEVICE_REQUEST;
+                if (!NT_SUCCESS(status))
+                {
+                    KdPrint(("AIMWrFltr:DeviceControl: StorageDeviceProperty, physical properties request failed: 0x%X.\n", status));
 
-                Irp->IoStatus.Status = status;
+                    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+                    return status;
+                }
+
+                if (Irp->IoStatus.Information > FIELD_OFFSET(STORAGE_DEVICE_DESCRIPTOR, RemovableMedia))
+                {
+                    PSTORAGE_DEVICE_DESCRIPTOR descriptor = (PSTORAGE_DEVICE_DESCRIPTOR)Irp->AssociatedIrp.SystemBuffer;
+
+                    if (descriptor->RemovableMedia)
+                    {
+                        KdPrint(("AIMWrFltr:DeviceControl: StorageDeviceProperty, reporting non-removable.\n"));
+                        descriptor->RemovableMedia = FALSE;
+                    }
+                }
+
                 IoCompleteRequest(Irp, IO_NO_INCREMENT);
                 return status;
             }
-#endif
-
             return AIMWrFltrSendToNextDriver(DeviceObject, Irp);
         }
 
-        //KdPrint(("AIMWrFltr:DeviceControl: Forwarding down read-only IOCTL %#x.\n",
-        //    io_stack->Parameters.DeviceIoControl.IoControlCode));
+        KdPrint(("AIMWrFltr:DeviceControl: Forwarding down read-only IOCTL %#x CTL_CODE(%s, %s, %s, %s).\n",
+            io_stack->Parameters.DeviceIoControl.IoControlCode,
+            AIMWrFltrGetIoctlDeviceTypeName(io_stack->Parameters.DeviceIoControl.IoControlCode),
+            AIMWrFltrGetIoctlFunctionName(io_stack->Parameters.DeviceIoControl.IoControlCode),
+            AIMWrFltrGetIoctlMethodName(io_stack->Parameters.DeviceIoControl.IoControlCode),
+            AIMWrFltrGetIoctlAccessName(io_stack->Parameters.DeviceIoControl.IoControlCode)));
 
         return AIMWrFltrSendToNextDriver(DeviceObject, Irp);
     }

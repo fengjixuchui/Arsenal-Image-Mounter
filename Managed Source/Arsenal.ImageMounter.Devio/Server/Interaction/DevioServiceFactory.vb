@@ -2,21 +2,26 @@
 ''''' Support routines for creating provider and service instances given a known
 ''''' proxy provider.
 ''''' 
-''''' Copyright (c) 2012-2020, Arsenal Consulting, Inc. (d/b/a Arsenal Recon) <http://www.ArsenalRecon.com>
+''''' Copyright (c) 2012-2021, Arsenal Consulting, Inc. (d/b/a Arsenal Recon) <https://www.ArsenalRecon.com>
 ''''' This source code and API are available under the terms of the Affero General Public
 ''''' License v3.
 '''''
 ''''' Please see LICENSE.txt for full license terms, including the availability of
 ''''' proprietary exceptions.
-''''' Questions, comments, or requests for clarification: http://ArsenalRecon.com/contact/
+''''' Questions, comments, or requests for clarification: https://ArsenalRecon.com/contact/
 '''''
 
+Imports System.Collections.ObjectModel
 Imports System.Globalization
+Imports System.IO
+Imports System.Reflection
 Imports Arsenal.ImageMounter.Devio.Server.GenericProviders
 Imports Arsenal.ImageMounter.Devio.Server.Services
 Imports Arsenal.ImageMounter.Devio.Server.SpecializedProviders
 Imports Arsenal.ImageMounter.Extensions
 Imports Arsenal.ImageMounter.IO
+Imports DiscUtils
+Imports DiscUtils.Streams
 
 Namespace Server.Interaction
 
@@ -54,6 +59,8 @@ Namespace Server.Interaction
 
             ReadOnlyFileSystem = 9
 
+            ReadWriteFileSystem = 11
+
         End Enum
 
         Private Shared ReadOnly SupportedVirtualDiskAccess As New Dictionary(Of ProxyType, ReadOnlyCollection(Of VirtualDiskAccess)) From
@@ -61,16 +68,19 @@ Namespace Server.Interaction
                 {ProxyType.None,
                  Array.AsReadOnly({VirtualDiskAccess.ReadOnly,
                                    VirtualDiskAccess.ReadWriteOriginal,
-                                   VirtualDiskAccess.ReadOnlyFileSystem})},
+                                   VirtualDiskAccess.ReadOnlyFileSystem,
+                                   VirtualDiskAccess.ReadWriteFileSystem})},
                 {ProxyType.MultiPartRaw,
                  Array.AsReadOnly({VirtualDiskAccess.ReadOnly,
                                    VirtualDiskAccess.ReadWriteOriginal,
-                                   VirtualDiskAccess.ReadOnlyFileSystem})},
+                                   VirtualDiskAccess.ReadOnlyFileSystem,
+                                   VirtualDiskAccess.ReadWriteFileSystem})},
                 {ProxyType.DiscUtils,
                  Array.AsReadOnly({VirtualDiskAccess.ReadOnly,
                                    VirtualDiskAccess.ReadWriteOriginal,
                                    VirtualDiskAccess.ReadWriteOverlay,
-                                   VirtualDiskAccess.ReadOnlyFileSystem})},
+                                   VirtualDiskAccess.ReadOnlyFileSystem,
+                                   VirtualDiskAccess.ReadWriteFileSystem})},
                 {ProxyType.LibEwf,
                  Array.AsReadOnly({VirtualDiskAccess.ReadOnly,
                                    VirtualDiskAccess.ReadWriteOverlay,
@@ -381,49 +391,37 @@ Namespace Server.Interaction
 
         End Function
 
-        Public Shared ReadOnly Property InstalledProvidersByProxyValueAndVirtualDiskAccess As New Dictionary(Of ProxyType, Func(Of String, VirtualDiskAccess, IDevioProvider))()
+        Public Shared ReadOnly Property InstalledProvidersByProxyValueAndVirtualDiskAccess As New Dictionary(Of ProxyType, Func(Of String, VirtualDiskAccess, IDevioProvider))() From {
+            {ProxyType.DiscUtils, AddressOf GetProviderDiscUtils},
+            {ProxyType.LibEwf, AddressOf GetProviderLibEwf},
+            {ProxyType.LibAFF4, AddressOf GetProviderLibAFF4},
+            {ProxyType.MultiPartRaw, AddressOf GetProviderMultiPartRaw},
+            {ProxyType.None, AddressOf GetProviderRaw}
+        }
 
-        Public Shared ReadOnly Property InstalledProvidersByProxyValueAndFileAccess As New Dictionary(Of ProxyType, Func(Of String, FileAccess, IDevioProvider))()
+        Public Shared ReadOnly Property InstalledProvidersByProxyValueAndFileAccess As New Dictionary(Of ProxyType, Func(Of String, FileAccess, IDevioProvider))() From {
+            {ProxyType.DiscUtils, AddressOf GetProviderDiscUtils},
+            {ProxyType.LibEwf, AddressOf GetProviderLibEwf},
+            {ProxyType.LibAFF4, AddressOf GetProviderLibAFF4},
+            {ProxyType.MultiPartRaw, AddressOf GetProviderMultiPartRaw},
+            {ProxyType.None, AddressOf GetProviderRaw}
+        }
 
-        Public Shared ReadOnly Property InstalledProvidersByNameAndVirtualDiskAccess As New Dictionary(Of String, Func(Of String, VirtualDiskAccess, IDevioProvider))(StringComparer.OrdinalIgnoreCase)
+        Public Shared ReadOnly Property InstalledProvidersByNameAndVirtualDiskAccess As New Dictionary(Of String, Func(Of String, VirtualDiskAccess, IDevioProvider))(StringComparer.OrdinalIgnoreCase) From {
+            {"DiscUtils", AddressOf GetProviderDiscUtils},
+            {"LibEwf", AddressOf GetProviderLibEwf},
+            {"LibAFF4", AddressOf GetProviderLibAFF4},
+            {"MultiPartRaw", AddressOf GetProviderMultiPartRaw},
+            {"None", AddressOf GetProviderRaw}
+        }
 
-        Public Shared ReadOnly Property InstalledProvidersByNameAndFileAccess As New Dictionary(Of String, Func(Of String, FileAccess, IDevioProvider))(StringComparer.OrdinalIgnoreCase)
-
-        Shared Sub New()
-
-            _InstalledProvidersByProxyValueAndVirtualDiskAccess.Add(ProxyType.DiscUtils, AddressOf GetProviderDiscUtils)
-            _InstalledProvidersByProxyValueAndVirtualDiskAccess.Add(ProxyType.LibEwf, AddressOf GetProviderLibEwf)
-            _InstalledProvidersByProxyValueAndVirtualDiskAccess.Add(ProxyType.LibAFF4, AddressOf GetProviderLibAFF4)
-            _InstalledProvidersByProxyValueAndVirtualDiskAccess.Add(ProxyType.MultiPartRaw, AddressOf GetProviderMultiPartRaw)
-            _InstalledProvidersByProxyValueAndVirtualDiskAccess.Add(ProxyType.None, AddressOf GetProviderRaw)
-
-            _InstalledProvidersByProxyValueAndFileAccess.Add(ProxyType.DiscUtils, AddressOf GetProviderDiscUtils)
-            _InstalledProvidersByProxyValueAndFileAccess.Add(ProxyType.LibEwf, AddressOf GetProviderLibEwf)
-            _InstalledProvidersByProxyValueAndFileAccess.Add(ProxyType.LibAFF4, AddressOf GetProviderLibAFF4)
-            _InstalledProvidersByProxyValueAndFileAccess.Add(ProxyType.MultiPartRaw, AddressOf GetProviderMultiPartRaw)
-            _InstalledProvidersByProxyValueAndFileAccess.Add(ProxyType.None, AddressOf GetProviderRaw)
-
-            _InstalledProvidersByNameAndFileAccess.Add("DiscUtils", AddressOf GetProviderDiscUtils)
-            _InstalledProvidersByNameAndFileAccess.Add("LibEWF", AddressOf GetProviderLibEwf)
-            _InstalledProvidersByNameAndFileAccess.Add("LibAFF4", AddressOf GetProviderLibAFF4)
-            _InstalledProvidersByNameAndFileAccess.Add("MultipartRaw", AddressOf GetProviderMultiPartRaw)
-            _InstalledProvidersByNameAndFileAccess.Add("None", AddressOf GetProviderRaw)
-
-            _InstalledProvidersByNameAndVirtualDiskAccess.Add("DiscUtils", AddressOf GetProviderDiscUtils)
-            _InstalledProvidersByNameAndVirtualDiskAccess.Add("LibEWF", AddressOf GetProviderLibEwf)
-            _InstalledProvidersByNameAndVirtualDiskAccess.Add("LibAFF4", AddressOf GetProviderLibAFF4)
-            _InstalledProvidersByNameAndVirtualDiskAccess.Add("MultipartRaw", AddressOf GetProviderMultiPartRaw)
-            _InstalledProvidersByNameAndVirtualDiskAccess.Add("None", AddressOf GetProviderRaw)
-
-            For Each asm In DiscUtilsAssemblies.Distinct()
-                Trace.WriteLine($"Registering DiscUtils assembly '{asm.FullName}'...")
-                Setup.SetupHelper.RegisterAssembly(asm)
-            Next
-
-        End Sub
-
-        Friend Shared Sub Initialize()
-        End Sub
+        Public Shared ReadOnly Property InstalledProvidersByNameAndFileAccess As New Dictionary(Of String, Func(Of String, FileAccess, IDevioProvider))(StringComparer.OrdinalIgnoreCase) From {
+            {"DiscUtils", AddressOf GetProviderDiscUtils},
+            {"LibEwf", AddressOf GetProviderLibEwf},
+            {"LibAFF4", AddressOf GetProviderLibAFF4},
+            {"MultiPartRaw", AddressOf GetProviderMultiPartRaw},
+            {"None", AddressOf GetProviderRaw}
+        }
 
         Private Shared ReadOnly DiscUtilsAssemblies As Assembly() = {
             GetType(Vmdk.Disk).Assembly,
@@ -435,6 +433,18 @@ Namespace Server.Interaction
             GetType(OpticalDisk.Disc).Assembly,
             GetType(Raw.Disk).Assembly
         }
+
+        Public Shared ReadOnly Property DiscUtilsInitialized As Boolean = InitializeDiscUtils()
+
+        Private Shared Function InitializeDiscUtils() As Boolean
+            Dim done = False
+            For Each asm In DiscUtilsAssemblies.Distinct()
+                Trace.WriteLine($"Registering DiscUtils assembly '{asm.FullName}'...")
+                Setup.SetupHelper.RegisterAssembly(asm)
+                done = True
+            Next
+            Return done
+        End Function
 
         ''' <summary>
         ''' Creates an object, of a DevioServiceBase derived class, to support devio proxy server end

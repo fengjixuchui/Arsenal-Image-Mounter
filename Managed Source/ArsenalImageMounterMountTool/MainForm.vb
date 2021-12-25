@@ -2,7 +2,7 @@
 ''''' MainForm.vb
 ''''' GUI mount tool.
 ''''' 
-''''' Copyright (c) 2012-2020, Arsenal Consulting, Inc. (d/b/a Arsenal Recon) <http://www.ArsenalRecon.com>
+''''' Copyright (c) 2012-2021, Arsenal Consulting, Inc. (d/b/a Arsenal Recon) <http://www.ArsenalRecon.com>
 ''''' This source code and API are available under the terms of the Affero General Public
 ''''' License v3.
 '''''
@@ -15,12 +15,20 @@ Imports Arsenal.ImageMounter.Devio.Server.Services
 Imports Arsenal.ImageMounter.Devio.Server.Interaction
 Imports System.Threading
 Imports System.Threading.Tasks
+Imports System.IO
 Imports System.Text
 Imports System.Runtime.InteropServices
+Imports Arsenal.ImageMounter.Extensions
 Imports Arsenal.ImageMounter.PSDisk
 Imports Arsenal.ImageMounter.IO
 Imports Arsenal.ImageMounter.Devio
 Imports System.Diagnostics.CodeAnalysis
+Imports Arsenal.ImageMounter
+Imports System.ComponentModel
+Imports System.Windows.Forms
+Imports System.Drawing
+
+#Disable Warning IDE1006 ' Naming Styles
 
 Public Class MainForm
 
@@ -38,9 +46,8 @@ Public Class MainForm
     Private IsClosing As Boolean
     Private LastCreatedDevice As UInteger?
 
-    Private ReadOnly DeviceListRefreshEvent As New EventWaitHandle(initialState:=False, mode:=EventResetMode.AutoReset)
+    Private ReadOnly DeviceListRefreshEvent As New AutoResetEvent(initialState:=False)
 
-    <SuppressMessage("Design", "CA1031:Do not catch general exception types", Justification:="<Pending>")>
     Protected Overrides Sub OnLoad(e As EventArgs)
 
         Dim SetupRun As Boolean
@@ -97,15 +104,9 @@ Public Class MainForm
                                        MessageBoxIcon.Information,
                                        MessageBoxDefaultButton.Button2) = DialogResult.OK Then
 
-                        Dim sd As New ProcessStartInfo With {
-                            .Arguments = "-r -t 0 -d p:0:0",
-                            .FileName = "shutdown.exe",
-                            .UseShellExecute = False,
-                            .CreateNoWindow = True
-                        }
                         Try
-                            Using Process.Start(sd)
-                            End Using
+                            NativeFileIO.ShutdownSystem(NativeFileIO.ShutdownFlags.Reboot, NativeFileIO.ShutdownReasons.ReasonFlagPlanned)
+                            Environment.Exit(0)
 
                         Catch ex2 As Exception
                             Trace.WriteLine(ex2.ToString())
@@ -179,7 +180,6 @@ Public Class MainForm
 
     End Sub
 
-    <SuppressMessage("Design", "CA1062:Validate arguments of public methods", Justification:="<Pending>")>
     Protected Overrides Sub OnClosing(e As CancelEventArgs)
 
         IsClosing = True
@@ -481,21 +481,21 @@ Public Class MainForm
     Private Sub btnShowOpened_Click(sender As Object, e As EventArgs) Handles btnShowOpened.Click
 
         Try
-            For Each DeviceItem In
-              lbDevices.
-              SelectedRows().
-              OfType(Of DataGridViewRow)().
-              Select(Function(row) row.DataBoundItem).
-              OfType(Of DiskStateView)()
+            For Each DeviceItem In lbDevices.
+                SelectedRows().
+                OfType(Of DataGridViewRow)().
+                Select(Function(row) row.DataBoundItem).
+                OfType(Of DiskStateView)()
 
-                Task.Factory.StartNew(
+                Dim item = Task.Factory.StartNew(
                     Function()
 
-                        Dim paths = API.EnumeratePhysicalDeviceObjectPaths(Adapter.DeviceInstance, DeviceItem.DeviceProperties.DeviceNumber).ToArray()
+                        Dim pdo_path = API.EnumeratePhysicalDeviceObjectPaths(Adapter.DeviceInstance, DeviceItem.DeviceProperties.DeviceNumber).FirstOrDefault()
+                        Dim dev_path = NativeFileIO.QueryDosDevice(NativeFileIO.GetPhysicalDriveNameForNtDevice(pdo_path)).FirstOrDefault()
 
-                        Dim processes = NativeFileIO.EnumerateProcessesHoldingFileHandle(paths)
+                        Dim processes = NativeFileIO.EnumerateProcessesHoldingFileHandle(pdo_path, dev_path).Select(AddressOf NativeFileIO.FormatProcessName)
 
-                        Dim processlist = String.Join(Environment.NewLine, From proc In processes Select $"Id = {proc.HandleTableEntry.ProcessId} Name = {proc.ProcessName}")
+                        Dim processlist = String.Join(Environment.NewLine, processes)
 
                         Return processlist
 
@@ -510,6 +510,31 @@ Public Class MainForm
                             MessageBoxIcon.Information)
 
                     End Sub, TaskScheduler.FromCurrentSynchronizationContext())
+
+                ThreadPool.QueueUserWorkItem(
+                    Sub()
+                        While Not item.Wait(TimeSpan.FromSeconds(2))
+
+                            Dim time = NativeFileIO.LastObjectNameQuueryTime
+
+                            If time = 0 OrElse NativeFileIO.SafeNativeMethods.GetTickCount64() - time < 4000 Then
+                                Continue While
+                            End If
+
+                            Invoke(Sub()
+
+                                       MessageBox.Show(Me,
+                                                       $"Handle enumeration hung. Last checked object access was 0x{NativeFileIO.LastObjectNameQueryGrantedAccess:X}",
+                                                       "Process list failed",
+                                                       MessageBoxButtons.OK,
+                                                       MessageBoxIcon.Error)
+
+                                   End Sub)
+
+                            Exit While
+
+                        End While
+                    End Sub)
 
             Next
 
@@ -528,12 +553,11 @@ Public Class MainForm
     Private Sub btnRemoveSelected_Click(sender As Object, e As EventArgs) Handles btnRemoveSelected.Click
 
         Try
-            For Each DeviceItem In
-              lbDevices.
-              SelectedRows().
-              OfType(Of DataGridViewRow)().
-              Select(Function(row) row.DataBoundItem).
-              OfType(Of DiskStateView)()
+            For Each DeviceItem In lbDevices.
+                SelectedRows().
+                OfType(Of DataGridViewRow)().
+                Select(Function(row) row.DataBoundItem).
+                OfType(Of DiskStateView)()
 
                 Adapter.RemoveDevice(DeviceItem.DeviceProperties.DeviceNumber)
             Next
@@ -767,11 +791,11 @@ Public Class MainForm
 
     End Sub
 
-    Private Function GetEmbeddedDriverVersion() As Version
+    Private Shared Function GetEmbeddedDriverVersion() As Version
 
         Using zipStream = GetType(MainForm).Assembly.GetManifestResourceStream(GetType(MainForm), "DriverFiles.zip")
 
-            Return DriverSetup.GetArchiveDriverVersion(zipStream)
+            Return DriverSetup.GetDriverVersionFromZipStream(zipStream)
 
         End Using
 
@@ -784,7 +808,7 @@ Public Class MainForm
 
                 Using zipStream = GetType(MainForm).Assembly.GetManifestResourceStream(GetType(MainForm), "DriverFiles.zip")
 
-                    DriverSetup.InstallFromZipFile(msgbox, zipStream)
+                    DriverSetup.InstallFromZipStream(msgbox, zipStream)
 
                 End Using
 

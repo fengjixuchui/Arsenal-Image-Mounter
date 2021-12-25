@@ -2,35 +2,38 @@
 ''''' API for manipulating flag values, issuing SCSI bus rescans and similar
 ''''' tasks.
 ''''' 
-''''' Copyright (c) 2012-2020, Arsenal Consulting, Inc. (d/b/a Arsenal Recon) <http://www.ArsenalRecon.com>
+''''' Copyright (c) 2012-2021, Arsenal Consulting, Inc. (d/b/a Arsenal Recon) <https://www.ArsenalRecon.com>
 ''''' This source code and API are available under the terms of the Affero General Public
 ''''' License v3.
 '''''
 ''''' Please see LICENSE.txt for full license terms, including the availability of
 ''''' proprietary exceptions.
-''''' Questions, comments, or requests for clarification: http://ArsenalRecon.com/contact/
+''''' Questions, comments, or requests for clarification: https://ArsenalRecon.com/contact/
 '''''
 
-Imports System.Diagnostics.CodeAnalysis
+Imports System.ComponentModel
+Imports System.IO
+Imports System.Runtime.InteropServices
+Imports System.Threading
 Imports Arsenal.ImageMounter.Extensions
 Imports Arsenal.ImageMounter.IO
 Imports Microsoft.Win32
+Imports Microsoft.Win32.SafeHandles
 
 ''' <summary>
-''' API for manipulating flag values, issuing SCSI bus rescans and similar tasks.
+''' API for manipulating flag values, issuing SCSI bus rescans, manage write filter driver and similar tasks.
 ''' </summary>
 <ComVisible(False)>
 Public NotInheritable Class API
 
     Private Sub New()
-
     End Sub
 
     ''' <summary>
     ''' Builds a list of device paths for active Arsenal Image Mounter
     ''' objects.
     ''' </summary>
-    Public Shared Iterator Function EnumerateAdapterDevicePaths(hwndParent As IntPtr) As IEnumerable(Of String)
+    Public Shared Iterator Function EnumerateAdapterDevicePaths(HwndParent As IntPtr) As IEnumerable(Of String)
 
         Dim devinstances As IEnumerable(Of String) = Nothing
         Dim status = NativeFileIO.EnumerateDeviceInstancesForService("phdskmnt", devinstances)
@@ -45,7 +48,7 @@ Public NotInheritable Class API
 
             Using DevInfoSet = NativeFileIO.UnsafeNativeMethods.SetupDiGetClassDevs(NativeFileIO.NativeConstants.SerenumBusEnumeratorGuid,
                                                                          devinstname,
-                                                                         hwndParent,
+                                                                         HwndParent,
                                                                          NativeFileIO.UnsafeNativeMethods.DIGCF_DEVICEINTERFACE Or NativeFileIO.UnsafeNativeMethods.DIGCF_PRESENT)
 
                 If DevInfoSet.IsInvalid Then
@@ -155,6 +158,8 @@ Public NotInheritable Class API
 
     End Function
 
+    Private Const NonRemovableSuffix As String = ":$NonRemovable"
+
     Private Shared ReadOnly KnownFormats As New Dictionary(Of String, Long)(StringComparer.OrdinalIgnoreCase) From
       {
         {"nrg", 600 << 9},
@@ -206,10 +211,34 @@ Public NotInheritable Class API
              {1UL << 10, " KB"},
              {2UL, " bytes"}}
 
-    Public Shared Function FormatFileSize(size As ULong) As String
+    Public Shared Function FormatBytes(size As ULong) As String
 
         For Each m In multipliers
             If size >= m.Key Then
+                Return $"{size / m.Key:0.0}{m.Value}"
+            End If
+        Next
+
+        Return $"{size} byte"
+
+    End Function
+
+    Public Shared Function FormatBytes(size As ULong, precision As Integer) As String
+
+        For Each m In multipliers
+            If size >= m.Key Then
+                Return $"{(size / m.Key).ToString("0." & New String("0"c, precision - 1))}{m.Value}"
+            End If
+        Next
+
+        Return $"{size} byte"
+
+    End Function
+
+    Public Shared Function FormatBytes(size As Long) As String
+
+        For Each m In multipliers
+            If Math.Abs(size) >= m.Key Then
                 Return $"{size / m.Key:0.000}{m.Value}"
             End If
         Next
@@ -218,11 +247,11 @@ Public NotInheritable Class API
 
     End Function
 
-    Public Shared Function FormatFileSize(size As Long) As String
+    Public Shared Function FormatBytes(size As Long, precision As Integer) As String
 
         For Each m In multipliers
-            If Math.Abs(size) >= m.Key Then
-                Return $"{size / m.Key:0.000}{m.Value}"
+            If size >= m.Key Then
+                Return $"{(size / m.Key).ToString("0." & New String("0"c, precision - 1))}{m.Value}"
             End If
         Next
 
@@ -294,7 +323,7 @@ Public NotInheritable Class API
 
         Return _
             From devinstChild In NativeFileIO.EnumerateChildDevices(devinstAdapter)
-            Let path = NativeFileIO.GetPhysicalDeviceObjectName(devinstChild)
+            Let path = NativeFileIO.GetPhysicalDeviceObjectNtPath(devinstChild)
             Where Not String.IsNullOrWhiteSpace(path)
             Let address = NativeFileIO.GetScsiAddressForNtDevice(path)
             Where address.HasValue AndAlso address.Value.DWordDeviceNumber.Equals(DeviceNumber)
@@ -306,7 +335,7 @@ Public NotInheritable Class API
 
         Return _
             From devinstChild In NativeFileIO.EnumerateChildDevices(devinstAdapter)
-            Let path = NativeFileIO.GetPhysicalDeviceObjectName(devinstChild)
+            Let path = NativeFileIO.GetPhysicalDeviceObjectNtPath(devinstChild)
             Where Not String.IsNullOrWhiteSpace(path)
             Let address = NativeFileIO.GetScsiAddressForNtDevice(path)
             Where address.HasValue AndAlso address.Value.DWordDeviceNumber.Equals(DeviceNumber)
@@ -316,26 +345,36 @@ Public NotInheritable Class API
     End Function
 
     Public Shared Sub UnregisterWriteOverlayImage(devInst As UInteger)
-        RegisterWriteOverlayImage(devInst, Nothing)
+        RegisterWriteOverlayImage(devInst, OverlayImagePath:=Nothing, FakeNonRemovable:=False)
     End Sub
 
     Public Shared Sub RegisterWriteOverlayImage(devInst As UInteger, OverlayImagePath As String)
+        RegisterWriteOverlayImage(devInst, OverlayImagePath, FakeNonRemovable:=False)
+    End Sub
 
-        Dim nativepath As String = Nothing
+    Public Shared Sub RegisterWriteOverlayImage(devInst As UInteger, OverlayImagePath As String, FakeNonRemovable As Boolean)
+
+        Dim nativepath As String
 
         If Not String.IsNullOrWhiteSpace(OverlayImagePath) Then
             nativepath = NativeFileIO.GetNtPath(OverlayImagePath)
+        Else
+            OverlayImagePath = Nothing
+            nativepath = Nothing
         End If
 
-        Dim dev_path = NativeFileIO.GetPhysicalDeviceObjectName(devInst)
+        Dim pdo_path = NativeFileIO.GetPhysicalDeviceObjectNtPath(devInst)
+        Dim dev_path = NativeFileIO.QueryDosDevice(NativeFileIO.GetPhysicalDriveNameForNtDevice(pdo_path)).FirstOrDefault()
 
-        Trace.WriteLine($"Device {dev_path} devinst {devInst}. Registering write overlay '{nativepath}'")
+        Trace.WriteLine($"Device {pdo_path} devinst {devInst}. Registering write overlay '{nativepath}', FakeNonRemovable={FakeNonRemovable}")
 
         Using regkey = Registry.LocalMachine.CreateSubKey("SYSTEM\CurrentControlSet\Services\aimwrfltr\Parameters")
             If nativepath Is Nothing Then
-                regkey.DeleteValue(dev_path, throwOnMissingValue:=False)
+                regkey.DeleteValue(pdo_path, throwOnMissingValue:=False)
+            ElseIf FakeNonRemovable Then
+                regkey.SetValue(pdo_path, $"{nativepath}{NonRemovableSuffix}", RegistryValueKind.String)
             Else
-                regkey.SetValue(dev_path, nativepath, RegistryValueKind.String)
+                regkey.SetValue(pdo_path, nativepath, RegistryValueKind.String)
             End If
         End Using
 
@@ -347,60 +386,72 @@ Public NotInheritable Class API
 
         Dim last_error = 0
 
-        For r = 1 To 2
+        For r = 1 To 4
 
             NativeFileIO.RestartDevice(NativeFileIO.NativeConstants.DiskClassGuid, devInst)
 
-            If nativepath Is Nothing Then
-                Return
-            End If
-
             Dim statistics As New WriteFilterStatistics
 
-            last_error = GetWriteOverlayStatus(dev_path, statistics)
+            last_error = GetWriteOverlayStatus(pdo_path, statistics)
 
+            Trace.WriteLine($"Overlay path '{nativepath}', I/O error code: {last_error}, aimwrfltr error code: 0x{statistics.LastErrorCode:X}, protection: {statistics.IsProtected}, initialized: {statistics.Initialized}")
 
-            If last_error = NativeFileIO.NativeConstants.ERROR_INVALID_FUNCTION Then
-                Trace.WriteLine("Filter driver not yet loaded, retrying...")
-                Thread.Sleep(200)
+            If nativepath Is Nothing AndAlso last_error = NativeFileIO.NativeConstants.NO_ERROR Then
+
+                Trace.WriteLine("Filter driver not yet unloaded, retrying...")
+                Thread.Sleep(300)
                 Continue For
-            ElseIf last_error <> NativeFileIO.NativeConstants.NO_ERROR Then
-                Throw New NotSupportedException("Error checking write filter driver status", New Win32Exception)
-            End If
 
-            If statistics.Initialized = 1 Then
+            ElseIf nativepath IsNot Nothing AndAlso (last_error = NativeFileIO.NativeConstants.ERROR_INVALID_FUNCTION OrElse
+                last_error = NativeFileIO.NativeConstants.ERROR_INVALID_PARAMETER OrElse
+                last_error = NativeFileIO.NativeConstants.ERROR_NOT_SUPPORTED) Then
+
+                Trace.WriteLine("Filter driver not yet loaded, retrying...")
+                Thread.Sleep(300)
+                Continue For
+
+            ElseIf (nativepath IsNot Nothing AndAlso last_error <> NativeFileIO.NativeConstants.NO_ERROR) OrElse
+                (nativepath Is Nothing AndAlso last_error <> NativeFileIO.NativeConstants.ERROR_INVALID_FUNCTION AndAlso
+                last_error <> NativeFileIO.NativeConstants.ERROR_INVALID_PARAMETER AndAlso
+                last_error <> NativeFileIO.NativeConstants.ERROR_NOT_SUPPORTED) Then
+
+                Throw New NotSupportedException("Error checking write filter driver status", New Win32Exception(last_error))
+
+            ElseIf (nativepath IsNot Nothing AndAlso statistics.Initialized) OrElse
+                nativepath Is Nothing Then
+
                 Return
+
             End If
 
             Throw New IOException("Error adding write overlay to device", NativeFileIO.GetExceptionForNtStatus(statistics.LastErrorCode))
 
         Next
 
-        Dim in_use_apps = NativeFileIO.EnumerateProcessesHoldingFileHandle(dev_path).ToArray()
+        Dim in_use_apps = NativeFileIO.EnumerateProcessesHoldingFileHandle(pdo_path, dev_path).Take(10).Select(AddressOf NativeFileIO.FormatProcessName).ToArray()
 
-        If in_use_apps.Length = 0 AndAlso last_error > 0 Then
+        If in_use_apps.Length = 0 AndAlso last_error <> 0 Then
             Throw New NotSupportedException("Write filter driver not attached to device", New Win32Exception(last_error))
         ElseIf in_use_apps.Length = 0 Then
             Throw New NotSupportedException("Write filter driver not attached to device")
         Else
-            Dim apps = String.Join(", ", From app In in_use_apps Select $"{app.ProcessName} (id={app.HandleTableEntry.ProcessId})")
-            Throw New UnauthorizedAccessException($"Write filter driver cannot be attached while applications hold the virtual disk device open. Currently, the following application{If(in_use_apps.Length <> 1, "s", "")} hold{If(in_use_apps.Length = 1, "s", "")} the disk device open: {apps}")
+            Dim apps = String.Join(", ", in_use_apps)
+
+            Throw New UnauthorizedAccessException($"Write filter driver cannot be attached while applications hold the disk device open.
+
+Currently, the following application{If(in_use_apps.Length <> 1, "s", "")} hold{If(in_use_apps.Length = 1, "s", "")} the disk device open:
+{apps}")
         End If
 
         Throw New FileNotFoundException("Error adding write overlay: Device not found.")
 
     End Sub
 
-    Public Enum RegisterWriteFilterOperation
-        Register
-        Unregister
-    End Enum
-
     Public Shared Sub RegisterWriteFilter(devinstAdapter As UInt32, DeviceNumber As UInt32, operation As RegisterWriteFilterOperation)
 
         For Each dev In
             From devinstChild In NativeFileIO.EnumerateChildDevices(devinstAdapter)
-            Let path = NativeFileIO.GetPhysicalDeviceObjectName(devinstChild)
+            Let path = NativeFileIO.GetPhysicalDeviceObjectNtPath(devinstChild)
             Where Not String.IsNullOrWhiteSpace(path)
             Let address = NativeFileIO.GetScsiAddressForNtDevice(path)
             Where address.HasValue AndAlso address.Value.DWordDeviceNumber.Equals(DeviceNumber)
@@ -437,7 +488,7 @@ Public NotInheritable Class API
                     Throw New NotSupportedException("Error checking write filter driver status", New Win32Exception)
                 End If
 
-                If statistics.Initialized = 1 Then
+                If statistics.Initialized Then
                     Return
                 End If
 
@@ -445,15 +496,18 @@ Public NotInheritable Class API
 
             Next
 
-            Dim in_use_apps = NativeFileIO.EnumerateProcessesHoldingFileHandle(dev.path).ToArray()
+            Dim in_use_apps = NativeFileIO.EnumerateProcessesHoldingFileHandle(dev.path).Take(10).Select(AddressOf NativeFileIO.FormatProcessName).ToArray()
 
             If in_use_apps.Length = 0 AndAlso last_error > 0 Then
                 Throw New NotSupportedException("Write filter driver not attached to device", New Win32Exception(last_error))
             ElseIf in_use_apps.Length = 0 Then
                 Throw New NotSupportedException("Write filter driver not attached to device")
             Else
-                Dim apps = String.Join(", ", From app In in_use_apps Select $"{app.ProcessName} (id={app.HandleTableEntry.ProcessId})")
-                Throw New UnauthorizedAccessException($"Write filter driver cannot be attached while applications hold the virtual disk device open. Currently, the following application{If(in_use_apps.Length <> 1, "s", "")} hold{If(in_use_apps.Length = 1, "s", "")} the disk device open: {apps}")
+                Dim apps = String.Join(", ", in_use_apps)
+                Throw New UnauthorizedAccessException($"Write filter driver cannot be attached while applications hold the virtual disk device open.
+
+Currently, the following application{If(in_use_apps.Length <> 1, "s", "")} hold{If(in_use_apps.Length = 1, "s", "")} the disk device open:
+{apps}")
             End If
         Next
 
@@ -461,10 +515,183 @@ Public NotInheritable Class API
 
     End Sub
 
+#If NET45_OR_GREATER OrElse NETCOREAPP OrElse NETSTANDARD Then
+    Public Shared Async Function RegisterWriteOverlayImageAsync(devInst As UInteger, OverlayImagePath As String, FakeNonRemovable As Boolean, cancel As CancellationToken) As Task
+
+        Dim nativepath As String
+
+        If Not String.IsNullOrWhiteSpace(OverlayImagePath) Then
+            nativepath = NativeFileIO.GetNtPath(OverlayImagePath)
+        Else
+            OverlayImagePath = Nothing
+            nativepath = Nothing
+        End If
+
+        Dim pdo_path = NativeFileIO.GetPhysicalDeviceObjectNtPath(devInst)
+        Dim dev_path = NativeFileIO.QueryDosDevice(NativeFileIO.GetPhysicalDriveNameForNtDevice(pdo_path)).FirstOrDefault()
+
+        Trace.WriteLine($"Device {pdo_path} devinst {devInst}. Registering write overlay '{nativepath}', FakeNonRemovable={FakeNonRemovable}")
+
+        Using regkey = Registry.LocalMachine.CreateSubKey("SYSTEM\CurrentControlSet\Services\aimwrfltr\Parameters")
+            If nativepath Is Nothing Then
+                regkey.DeleteValue(pdo_path, throwOnMissingValue:=False)
+            ElseIf FakeNonRemovable Then
+                regkey.SetValue(pdo_path, $"{nativepath}{NonRemovableSuffix}", RegistryValueKind.String)
+            Else
+                regkey.SetValue(pdo_path, nativepath, RegistryValueKind.String)
+            End If
+        End Using
+
+        If nativepath Is Nothing Then
+            NativeFileIO.RemoveFilter(devInst, "aimwrfltr")
+        Else
+            NativeFileIO.AddFilter(devInst, "aimwrfltr")
+        End If
+
+        Dim last_error = 0
+
+        For r = 1 To 4
+
+            NativeFileIO.RestartDevice(NativeFileIO.NativeConstants.DiskClassGuid, devInst)
+
+            Dim statistics As New WriteFilterStatistics
+
+            last_error = GetWriteOverlayStatus(pdo_path, statistics)
+
+            Trace.WriteLine($"Overlay path '{nativepath}', I/O error code: {last_error}, aimwrfltr error code: 0x{statistics.LastErrorCode:X}, protection: {statistics.IsProtected}, initialized: {statistics.Initialized}")
+
+            If nativepath Is Nothing AndAlso last_error = NativeFileIO.NativeConstants.NO_ERROR Then
+
+                Trace.WriteLine("Filter driver not yet unloaded, retrying...")
+                Await Task.Delay(300, cancel).ConfigureAwait(continueOnCapturedContext:=False)
+                Continue For
+
+            ElseIf nativepath IsNot Nothing AndAlso (last_error = NativeFileIO.NativeConstants.ERROR_INVALID_FUNCTION OrElse
+                last_error = NativeFileIO.NativeConstants.ERROR_INVALID_PARAMETER OrElse
+                last_error = NativeFileIO.NativeConstants.ERROR_NOT_SUPPORTED) Then
+
+                Trace.WriteLine("Filter driver not yet loaded, retrying...")
+                Await Task.Delay(300, cancel).ConfigureAwait(continueOnCapturedContext:=False)
+                Continue For
+
+            ElseIf (nativepath IsNot Nothing AndAlso last_error <> NativeFileIO.NativeConstants.NO_ERROR) OrElse
+                (nativepath Is Nothing AndAlso last_error <> NativeFileIO.NativeConstants.ERROR_INVALID_FUNCTION AndAlso
+                last_error <> NativeFileIO.NativeConstants.ERROR_INVALID_PARAMETER AndAlso
+                last_error <> NativeFileIO.NativeConstants.ERROR_NOT_SUPPORTED) Then
+
+                Throw New NotSupportedException("Error checking write filter driver status", New Win32Exception(last_error))
+
+            ElseIf (nativepath IsNot Nothing AndAlso statistics.Initialized) OrElse
+                nativepath Is Nothing Then
+
+                Return
+
+            End If
+
+            Throw New IOException("Error adding write overlay to device", NativeFileIO.GetExceptionForNtStatus(statistics.LastErrorCode))
+
+        Next
+
+        Dim in_use_apps = NativeFileIO.EnumerateProcessesHoldingFileHandle(pdo_path, dev_path).Take(10).Select(AddressOf NativeFileIO.FormatProcessName).ToArray()
+
+        If in_use_apps.Length = 0 AndAlso last_error <> 0 Then
+            Throw New NotSupportedException("Write filter driver not attached to device", New Win32Exception(last_error))
+        ElseIf in_use_apps.Length = 0 Then
+            Throw New NotSupportedException("Write filter driver not attached to device")
+        Else
+            Dim apps = String.Join(", ", in_use_apps)
+
+            Throw New UnauthorizedAccessException($"Write filter driver cannot be attached while applications hold the disk device open.
+
+Currently, the following application{If(in_use_apps.Length <> 1, "s", "")} hold{If(in_use_apps.Length = 1, "s", "")} the disk device open:
+{apps}")
+        End If
+
+        Throw New FileNotFoundException("Error adding write overlay: Device not found.")
+
+    End Function
+
+    Public Shared Async Function RegisterWriteFilterAsync(devinstAdapter As UInt32, DeviceNumber As UInt32, operation As RegisterWriteFilterOperation, cancel As CancellationToken) As Task
+
+        For Each dev In
+            From devinstChild In NativeFileIO.EnumerateChildDevices(devinstAdapter)
+            Let path = NativeFileIO.GetPhysicalDeviceObjectNtPath(devinstChild)
+            Where Not String.IsNullOrWhiteSpace(path)
+            Let address = NativeFileIO.GetScsiAddressForNtDevice(path)
+            Where address.HasValue AndAlso address.Value.DWordDeviceNumber.Equals(DeviceNumber)
+
+            Trace.WriteLine($"Device number {DeviceNumber:X6}  found at {dev.path} devinst {dev.devinstChild}. Registering write filter driver.")
+
+            If operation = RegisterWriteFilterOperation.Unregister Then
+
+                If NativeFileIO.RemoveFilter(dev.devinstChild, "aimwrfltr") Then
+                    NativeFileIO.RestartDevice(NativeFileIO.NativeConstants.DiskClassGuid, dev.devinstChild)
+                End If
+
+                Return
+
+            End If
+
+            Dim last_error = 0
+
+            For r = 1 To 2
+
+                If NativeFileIO.AddFilter(dev.devinstChild, "aimwrfltr") Then
+                    NativeFileIO.RestartDevice(NativeFileIO.NativeConstants.DiskClassGuid, dev.devinstChild)
+                End If
+
+                Dim statistics As New WriteFilterStatistics
+
+                last_error = GetWriteOverlayStatus(dev.path, statistics)
+
+                If last_error = NativeFileIO.NativeConstants.ERROR_INVALID_FUNCTION Then
+                    Trace.WriteLine("Filter driver not loaded, retrying...")
+                    Await Task.Delay(200, cancel).ConfigureAwait(continueOnCapturedContext:=False)
+                    Continue For
+                ElseIf last_error <> NativeFileIO.NativeConstants.NO_ERROR Then
+                    Throw New NotSupportedException("Error checking write filter driver status", New Win32Exception)
+                End If
+
+                If statistics.Initialized Then
+                    Return
+                End If
+
+                Throw New IOException("Error adding write overlay to device", NativeFileIO.GetExceptionForNtStatus(statistics.LastErrorCode))
+
+            Next
+
+            Dim in_use_apps = NativeFileIO.EnumerateProcessesHoldingFileHandle(dev.path).Take(10).Select(AddressOf NativeFileIO.FormatProcessName).ToArray()
+
+            If in_use_apps.Length = 0 AndAlso last_error > 0 Then
+                Throw New NotSupportedException("Write filter driver not attached to device", New Win32Exception(last_error))
+            ElseIf in_use_apps.Length = 0 Then
+                Throw New NotSupportedException("Write filter driver not attached to device")
+            Else
+                Dim apps = String.Join(", ", in_use_apps)
+                Throw New UnauthorizedAccessException($"Write filter driver cannot be attached while applications hold the virtual disk device open.
+
+Currently, the following application{If(in_use_apps.Length <> 1, "s", "")} hold{If(in_use_apps.Length = 1, "s", "")} the disk device open:
+{apps}")
+            End If
+        Next
+
+        Throw New FileNotFoundException("Error adding write overlay: Device not found.")
+
+    End Function
+
+#End If
+
+    Public Enum RegisterWriteFilterOperation
+        Register
+        Unregister
+    End Enum
+
     ''' <summary>
     ''' Retrieves status of write overlay for mounted device.
     ''' </summary>
-    ''' <param name="NtDevicePath">Path to device.</param>
+    ''' <param name="NtDevicePath">NT path to device.</param>
+    ''' <param name="Statistics">Data structure that receives current statistics and settings for filter</param>
+    ''' <returns>Returns 0 on success or Win32 error code on failure</returns>
     Public Shared Function GetWriteOverlayStatus(NtDevicePath As String, <Out> ByRef Statistics As WriteFilterStatistics) As Integer
 
         Using hDevice = NativeFileIO.NtCreateFile(NtDevicePath, 0, 0, FileShare.ReadWrite, NativeFileIO.NtCreateDisposition.Open, NativeFileIO.NtCreateOptions.NonDirectoryFile, 0, Nothing, Nothing)
@@ -479,13 +706,13 @@ Public NotInheritable Class API
     ''' Retrieves status of write overlay for mounted device.
     ''' </summary>
     ''' <param name="hDevice">Handle to device.</param>
+    ''' <param name="Statistics">Data structure that receives current statistics and settings for filter</param>
+    ''' <returns>Returns 0 on success or Win32 error code on failure</returns>
     Public Shared Function GetWriteOverlayStatus(hDevice As SafeFileHandle, <Out> ByRef Statistics As WriteFilterStatistics) As Integer
 
-        Statistics.Initialize()
+        Statistics = WriteFilterStatistics.Initialize()
 
-        Static WriteFilterStatisticsSize As UInteger = CUInt(Marshal.SizeOf(GetType(WriteFilterStatistics)))
-
-        If UnsafeNativeMethods.DeviceIoControl(hDevice, UnsafeNativeMethods.IOCTL_AIMWRFLTR_GET_DEVICE_DATA, IntPtr.Zero, 0, Statistics, WriteFilterStatisticsSize, Nothing, Nothing) Then
+        If UnsafeNativeMethods.DeviceIoControl(hDevice, UnsafeNativeMethods.IOCTL_AIMWRFLTR_GET_DEVICE_DATA, IntPtr.Zero, 0, Statistics, Statistics.Version, Nothing, Nothing) Then
             Return NativeFileIO.NativeConstants.NO_ERROR
         Else
             Return Marshal.GetLastWin32Error()
@@ -493,7 +720,40 @@ Public NotInheritable Class API
 
     End Function
 
-    <SuppressMessage("Style", "CA1812:Naming Styles")>
+    ''' <summary>
+    ''' Deletes the write overlay image file after use. Also sets this filter driver to
+    ''' silently ignore flush requests to improve performance when integrity of the write
+    ''' overlay image is not needed for future sessions.
+    ''' </summary>
+    ''' <param name="NtDevicePath">NT path to device.</param>
+    ''' <returns>Returns 0 on success or Win32 error code on failure</returns>
+    Public Shared Function SetWriteOverlayDeleteOnClose(NtDevicePath As String) As Integer
+
+        Using hDevice = NativeFileIO.NtCreateFile(NtDevicePath, 0, FileAccess.ReadWrite, FileShare.ReadWrite, NativeFileIO.NtCreateDisposition.Open, NativeFileIO.NtCreateOptions.NonDirectoryFile, 0, Nothing, Nothing)
+
+            Return SetWriteOverlayDeleteOnClose(hDevice)
+
+        End Using
+
+    End Function
+
+    ''' <summary>
+    ''' Deletes the write overlay image file after use. Also sets this filter driver to
+    ''' silently ignore flush requests to improve performance when integrity of the write
+    ''' overlay image is not needed for future sessions.
+    ''' </summary>
+    ''' <param name="hDevice">Handle to device.</param>
+    ''' <returns>Returns 0 on success or Win32 error code on failure</returns>
+    Public Shared Function SetWriteOverlayDeleteOnClose(hDevice As SafeFileHandle) As Integer
+
+        If UnsafeNativeMethods.DeviceIoControl(hDevice, UnsafeNativeMethods.IOCTL_AIMWRFLTR_DELETE_ON_CLOSE, IntPtr.Zero, 0, IntPtr.Zero, 0, Nothing, Nothing) Then
+            Return NativeFileIO.NativeConstants.NO_ERROR
+        Else
+            Return Marshal.GetLastWin32Error()
+        End If
+
+    End Function
+
     Private NotInheritable Class UnsafeNativeMethods
 
         Private Sub New()
@@ -501,12 +761,24 @@ Public NotInheritable Class API
 
         Public Const IOCTL_AIMWRFLTR_GET_DEVICE_DATA = &H88443404UI
 
+        Public Const IOCTL_AIMWRFLTR_DELETE_ON_CLOSE = &H8844F407UI
+
         Public Declare Function DeviceIoControl Lib "kernel32" (
               hDevice As SafeFileHandle,
               dwIoControlCode As UInt32,
               lpInBuffer As IntPtr,
               nInBufferSize As UInt32,
               <Out> ByRef lpOutBuffer As WriteFilterStatistics,
+              nOutBufferSize As UInt32,
+              <Out> ByRef lpBytesReturned As UInt32,
+              lpOverlapped As IntPtr) As Boolean
+
+        Public Declare Function DeviceIoControl Lib "kernel32" (
+              hDevice As SafeFileHandle,
+              dwIoControlCode As UInt32,
+              lpInBuffer As IntPtr,
+              nInBufferSize As UInt32,
+              lpOutBuffer As IntPtr,
               nOutBufferSize As UInt32,
               <Out> ByRef lpBytesReturned As UInt32,
               lpOverlapped As IntPtr) As Boolean

@@ -1,6 +1,6 @@
 ﻿''''' Driver Version / Setup Verify application.
 ''''' 
-''''' Copyright (c) 2012-2020, Arsenal Consulting, Inc. (d/b/a Arsenal Recon) <http://www.ArsenalRecon.com>
+''''' Copyright (c) 2012-2021, Arsenal Consulting, Inc. (d/b/a Arsenal Recon) <http://www.ArsenalRecon.com>
 ''''' This source code and API are available under the terms of the Affero General Public
 ''''' License v3.
 '''''
@@ -12,6 +12,7 @@
 Imports System.IO
 Imports Arsenal.ImageMounter.Extensions
 Imports Arsenal.ImageMounter.IO
+Imports Microsoft.Win32.SafeHandles
 
 Module Module1
 
@@ -35,12 +36,12 @@ Module Module1
             Console.Write(dev)
             Console.Write(" => ")
             Try
-                Using NativeFileIO.OpenFileHandle("\\?\" & dev, FileAccess.ReadWrite, FileShare.ReadWrite, FileMode.Open, False)
+                Using NativeFileIO.OpenFileHandle($"\\?\{dev}", FileAccess.ReadWrite, FileShare.ReadWrite, FileMode.Open, False)
                 End Using
                 Console.WriteLine("Successful.")
 
             Catch ex As Exception
-                Console.WriteLine($"Error: {ex.ToString()}")
+                Console.WriteLine($"Error: {ex}")
 
             End Try
         Next

@@ -2,7 +2,7 @@
 /// aimapi.cpp
 /// Implementation of public API routines.
 /// 
-/// Copyright (c) 2012-2020, Arsenal Consulting, Inc. (d/b/a Arsenal Recon) <http://www.ArsenalRecon.com>
+/// Copyright (c) 2012-2021, Arsenal Consulting, Inc. (d/b/a Arsenal Recon) <http://www.ArsenalRecon.com>
 /// This source code and API are available under the terms of the Affero General Public
 /// License v3.
 ///
@@ -136,7 +136,7 @@ ImScsiMsgBoxLastError(HWND hWnd, LPCWSTR Prefix)
 {
     WPreserveLastError ple;
 
-    LPWSTR MsgBuf;
+    LPWSTR MsgBuf = NULL;
 
     FormatMessage(FORMAT_MESSAGE_ALLOCATE_BUFFER |
         FORMAT_MESSAGE_FROM_SYSTEM |
@@ -1052,8 +1052,8 @@ ImScsiCreateDeviceEx(IN HWND hWnd OPTIONAL,
     }
 
     // Physical memory allocation requires the AWEAlloc driver.
-    if (((IMSCSI_TYPE(*Flags) == IMSCSI_TYPE_FILE) |
-        (IMSCSI_TYPE(*Flags) == 0)) &
+    if (((IMSCSI_TYPE(*Flags) == IMSCSI_TYPE_FILE) ||
+        (IMSCSI_TYPE(*Flags) == 0)) &&
         (IMSCSI_FILE_TYPE(*Flags) == IMSCSI_FILE_TYPE_AWEALLOC))
     {
         HANDLE awealloc;
@@ -1193,7 +1193,7 @@ ImScsiCreateDeviceEx(IN HWND hWnd OPTIONAL,
             return FALSE;
         }
     }
-    else if ((IMSCSI_TYPE(*Flags) == IMSCSI_TYPE_PROXY) &
+    else if ((IMSCSI_TYPE(*Flags) == IMSCSI_TYPE_PROXY) &&
         (IMSCSI_PROXY_TYPE(*Flags) == IMSCSI_PROXY_TYPE_SHM))
     {
         LPWSTR namespace_prefix;
@@ -1784,8 +1784,8 @@ LPCWSTR MountPoint)
         drive_letter_path[4] = MountPoint[0];
 
         // Notify processes that this device is about to be removed.
-        if (((APIFlags & IMSCSI_API_NO_BROADCAST_NOTIFY) == 0) &
-            (MountPoint[0] >= L'A') & (MountPoint[0] <= L'Z'))
+        if (((APIFlags & IMSCSI_API_NO_BROADCAST_NOTIFY) == 0) &&
+            (MountPoint[0] >= L'A') && (MountPoint[0] <= L'Z'))
         {
 
             ImScsiSetStatusMsg

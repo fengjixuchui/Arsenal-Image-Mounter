@@ -5,7 +5,7 @@
 ''''' for directly examining virtual disk contents directly in an application,
 ''''' even if that disk contents is accessed through a proxy.
 ''''' 
-''''' Copyright (c) 2012-2020, Arsenal Consulting, Inc. (d/b/a Arsenal Recon) <http://www.ArsenalRecon.com>
+''''' Copyright (c) 2012-2021, Arsenal Consulting, Inc. (d/b/a Arsenal Recon) <http://www.ArsenalRecon.com>
 ''''' This source code and API are available under the terms of the Affero General Public
 ''''' License v3.
 '''''
@@ -14,6 +14,10 @@
 ''''' Questions, comments, or requests for clarification: http://ArsenalRecon.com/contact/
 '''''
 
+Imports System.IO
+Imports System.IO.MemoryMappedFiles
+Imports System.Runtime.InteropServices
+Imports System.Threading
 Imports Arsenal.ImageMounter.Devio.IMDPROXY_CONSTANTS
 
 Namespace Client

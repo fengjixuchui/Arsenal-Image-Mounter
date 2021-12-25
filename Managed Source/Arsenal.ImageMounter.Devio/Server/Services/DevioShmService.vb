@@ -1,7 +1,7 @@
 ﻿
 ''''' DevioShmService.vb
 ''''' 
-''''' Copyright (c) 2012-2020, Arsenal Consulting, Inc. (d/b/a Arsenal Recon) <http://www.ArsenalRecon.com>
+''''' Copyright (c) 2012-2021, Arsenal Consulting, Inc. (d/b/a Arsenal Recon) <http://www.ArsenalRecon.com>
 ''''' This source code and API are available under the terms of the Affero General Public
 ''''' License v3.
 '''''
@@ -10,6 +10,10 @@
 ''''' Questions, comments, or requests for clarification: http://ArsenalRecon.com/contact/
 '''''
 
+Imports System.IO
+Imports System.IO.MemoryMappedFiles
+Imports System.Runtime.InteropServices
+Imports System.Threading
 Imports Arsenal.ImageMounter.Devio.IMDPROXY_CONSTANTS
 Imports Arsenal.ImageMounter.Devio.Server.GenericProviders
 Imports Arsenal.ImageMounter.IO
@@ -53,8 +57,8 @@ Namespace Server.Services
         ''' </summary>
         Public Const DefaultBufferSize As Long = (8 << 20) + IMDPROXY_HEADER_SIZE
 
-        Private Shared Function GetNextRandomValue() As Integer
-            Return NativeFileIO.GenRandomInt32()
+        Private Shared Function GetNextRandomValue() As Guid
+            Return NativeFileIO.GenRandomGuid()
         End Function
 
         ''' <summary>
@@ -69,8 +73,8 @@ Namespace Server.Services
         Public Sub New(ObjectName As String, DevioProvider As IDevioProvider, OwnsProvider As Boolean, BufferSize As Long)
             MyBase.New(DevioProvider, OwnsProvider)
 
-            Me.ObjectName = ObjectName
-            Me.BufferSize = BufferSize
+            _ObjectName = ObjectName
+            _BufferSize = BufferSize
 
         End Sub
 
@@ -117,39 +121,42 @@ Namespace Server.Services
         ''' </summary>
         Public Overrides Sub RunService()
 
-            Using DisposableObjects As New DisposableList(Of IDisposable)
+            Using DisposableObjects As New DisposableList
 
-                Dim RequestEvent As WaitHandle
+                Dim RequestEvent As EventWaitHandle
 
-                Dim ResponseEvent As WaitHandle
+                Dim ResponseEvent As EventWaitHandle
 
                 Dim Mapping As MemoryMappedFile
 
-                Dim MapView As SafeMemoryMappedViewHandle
+                Dim MapView As MemoryMappedViewAccessor
 
                 Dim ServerMutex As Mutex
 
-                Trace.WriteLine($"Creating objects for shared memory communication '{ObjectName}'.")
+                Trace.WriteLine($"Creating objects for shared memory communication '{_ObjectName}'.")
 
                 Try
 
-                    RequestEvent = New EventWaitHandle(initialState:=False, mode:=EventResetMode.AutoReset, name:=$"Global\{ObjectName}_Request")
-                    ResponseEvent = New EventWaitHandle(initialState:=False, mode:=EventResetMode.AutoReset, name:=$"Global\{ObjectName}_Response")
-                    ServerMutex = New Mutex(initiallyOwned:=False, name:=$"Global\{ObjectName}_Server")
+                    RequestEvent = New EventWaitHandle(initialState:=False, mode:=EventResetMode.AutoReset, name:=$"Global\{_ObjectName}_Request")
+                    DisposableObjects.Add(RequestEvent)
+                    ResponseEvent = New EventWaitHandle(initialState:=False, mode:=EventResetMode.AutoReset, name:=$"Global\{_ObjectName}_Response")
+                    DisposableObjects.Add(ResponseEvent)
+                    ServerMutex = New Mutex(initiallyOwned:=False, name:=$"Global\{_ObjectName}_Server")
+                    DisposableObjects.Add(ServerMutex)
 
                     If ServerMutex.WaitOne(0) = False Then
-                        Dim message As String = $"Service name '{ObjectName}' busy."
+                        Dim message As String = $"Service name '{_ObjectName}' busy."
                         Trace.WriteLine(message)
                         Throw New Exception(message)
                     End If
 
                 Catch ex As Exception
                     If TypeOf ex Is UnauthorizedAccessException Then
-                        Exception = New Exception($"Service name '{ObjectName}' already in use or not accessible.", ex)
+                        Exception = New Exception($"Service name '{_ObjectName}' already in use or not accessible.", ex)
                     Else
                         Exception = ex
                     End If
-                    Dim message As String = $"Service thread initialization failed: {Exception}."
+                    Dim message = $"Service thread initialization failed: {Exception}."
                     Trace.WriteLine(message)
                     OnServiceInitFailed(EventArgs.Empty)
                     Return
@@ -157,20 +164,28 @@ Namespace Server.Services
                 End Try
 
                 Try
-                    Mapping = MemoryMappedFile.CreateNew($"Global\{ObjectName}",
-                                                         BufferSize,
+#If NETFRAMEWORK AndAlso Not NET46_OR_GREATER Then
+                    Mapping = MemoryMappedFile.CreateNew($"Global\{_ObjectName}",
+                                                         _BufferSize,
                                                          MemoryMappedFileAccess.ReadWrite,
                                                          MemoryMappedFileOptions.None,
                                                          Nothing,
                                                          HandleInheritability.None)
+#Else
+                    Mapping = MemoryMappedFile.CreateNew($"Global\{_ObjectName}",
+                                                         _BufferSize,
+                                                         MemoryMappedFileAccess.ReadWrite,
+                                                         MemoryMappedFileOptions.None,
+                                                         HandleInheritability.None)
+#End If
 
                     DisposableObjects.Add(Mapping)
 
-                    MapView = Mapping.CreateViewAccessor().SafeMemoryMappedViewHandle
+                    MapView = Mapping.CreateViewAccessor()
 
                     DisposableObjects.Add(MapView)
 
-                    _MaxTransferSize = CInt(MapView.ByteLength - IMDPROXY_HEADER_SIZE)
+                    _MaxTransferSize = CInt(MapView.Capacity - IMDPROXY_HEADER_SIZE)
 
                     Trace.WriteLine($"Created shared memory object, {_MaxTransferSize} bytes.")
 
@@ -183,7 +198,7 @@ Namespace Server.Services
                     Else
                         Exception = ex
                     End If
-                    Dim message As String = $"Service thread initialization failed: {Exception}."
+                    Dim message = $"Service thread initialization failed: {Exception}."
                     Trace.WriteLine(message)
                     OnServiceInitFailed(EventArgs.Empty)
                     Return
@@ -193,7 +208,7 @@ Namespace Server.Services
                 Try
                     Trace.WriteLine("Waiting for client to connect.")
 
-                    Using StopServiceThreadEvent As New EventWaitHandle(initialState:=False, mode:=EventResetMode.ManualReset)
+                    Using StopServiceThreadEvent As New ManualResetEvent(initialState:=False)
                         Dim StopServiceThreadHandler As New EventHandler(Sub() StopServiceThreadEvent.Set())
                         AddHandler StopServiceThread, StopServiceThreadHandler
                         Dim WaitEvents = {RequestEvent, StopServiceThreadEvent}
@@ -213,11 +228,14 @@ Namespace Server.Services
 
                     Trace.WriteLine("Client connected, waiting for request.")
 
+                    Dim request_shutdown As Boolean
+
                     InternalShutdownRequestAction =
                         Sub()
                             Try
                                 Trace.WriteLine("Emergency service thread shutdown requested, injecting close request...")
-                                ServiceThread.Abort()
+                                request_shutdown = True
+                                RequestEvent.Set()
 
                             Catch
 
@@ -225,27 +243,32 @@ Namespace Server.Services
                         End Sub
 
                     Do
-                        Dim RequestCode = MapView.Read(Of IMDPROXY_REQ)(&H0)
+                        If request_shutdown Then
+                            Trace.WriteLine("Emergency shutdown. Closing connection.")
+                            Return
+                        End If
+
+                        Dim RequestCode = MapView.SafeMemoryMappedViewHandle.Read(Of IMDPROXY_REQ)(&H0)
 
                         'Trace.WriteLine("Got client request: " & RequestCode.ToString())
 
                         Select Case RequestCode
 
                             Case IMDPROXY_REQ.IMDPROXY_REQ_INFO
-                                SendInfo(MapView)
+                                SendInfo(MapView.SafeMemoryMappedViewHandle)
 
                             Case IMDPROXY_REQ.IMDPROXY_REQ_READ
-                                ReadData(MapView)
+                                ReadData(MapView.SafeMemoryMappedViewHandle)
 
                             Case IMDPROXY_REQ.IMDPROXY_REQ_WRITE
-                                WriteData(MapView)
+                                WriteData(MapView.SafeMemoryMappedViewHandle)
 
                             Case IMDPROXY_REQ.IMDPROXY_REQ_CLOSE
                                 Trace.WriteLine("Closing connection.")
                                 Return
 
                             Case IMDPROXY_REQ.IMDPROXY_REQ_SHARED
-                                SharedKeys(MapView)
+                                SharedKeys(MapView.SafeMemoryMappedViewHandle)
 
                             Case Else
                                 Trace.WriteLine($"Unsupported request code: {RequestCode}")
@@ -290,7 +313,6 @@ Namespace Server.Services
 
         End Sub
 
-        <CodeAnalysis.SuppressMessage("Microsoft.Reliability", "CA2001:AvoidCallingProblematicMethods", MessageId:="System.Runtime.InteropServices.SafeHandle.DangerousGetHandle")>
         Private Sub ReadData(MapView As SafeBuffer)
 
             Dim Request = MapView.Read(Of IMDPROXY_READ_REQ)(&H0)
@@ -328,7 +350,6 @@ Namespace Server.Services
 
         End Sub
 
-        <CodeAnalysis.SuppressMessage("Microsoft.Reliability", "CA2001:AvoidCallingProblematicMethods", MessageId:="System.Runtime.InteropServices.SafeHandle.DangerousGetHandle")>
         Private Sub WriteData(MapView As SafeBuffer)
 
             Dim Request = MapView.Read(Of IMDPROXY_WRITE_REQ)(&H0)
@@ -370,7 +391,7 @@ Namespace Server.Services
 
         End Sub
 
-        Private Shared ReadOnly SizeOfULong As Integer = Marshal.SizeOf(GetType(ULong))
+        Private Shared ReadOnly SizeOfULong As Integer = PinnedBuffer(Of ULong).TypeSize
 
         Private Sub SharedKeys(MapView As SafeBuffer)
 
@@ -401,7 +422,7 @@ Namespace Server.Services
 
         Protected Overrides ReadOnly Property ProxyObjectName As String
             Get
-                Return ObjectName
+                Return _ObjectName
             End Get
         End Property
 

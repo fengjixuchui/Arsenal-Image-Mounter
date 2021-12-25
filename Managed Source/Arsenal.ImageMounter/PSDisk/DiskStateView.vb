@@ -1,4 +1,5 @@
-﻿Imports System.Diagnostics.CodeAnalysis
+﻿Imports System.ComponentModel
+Imports System.Diagnostics.CodeAnalysis
 Imports Arsenal.ImageMounter.PSDisk
 
 Namespace PSDisk
@@ -23,6 +24,14 @@ Namespace PSDisk
         Public Property DevicePath As String
 
         Public Property DeviceName As String
+
+        Public Property StorageDeviceNumber As IO.NativeFileIO.STORAGE_DEVICE_NUMBER?
+
+        Public ReadOnly Property DriveNumberString As String
+            Get
+                Return _StorageDeviceNumber?.DeviceNumber.ToString()
+            End Get
+        End Property
 
         Public ReadOnly Property ScsiId As String
             Get
@@ -122,7 +131,7 @@ Namespace PSDisk
                     Return Nothing
                 End If
 
-                Return API.FormatFileSize(size.Value)
+                Return API.FormatBytes(size.Value)
             End Get
         End Property
 
@@ -132,7 +141,6 @@ Namespace PSDisk
 
         Public Property FakeMBR As Boolean
 
-        <SuppressMessage("Performance", "CA1819:Properties should not return arrays", Justification:="<Pending>")>
         Public Property Volumes As String()
 
         Public ReadOnly Property VolumesString As String
@@ -144,7 +152,6 @@ Namespace PSDisk
             End Get
         End Property
 
-        <SuppressMessage("Performance", "CA1819:Properties should not return arrays", Justification:="<Pending>")>
         Public Property MountPoints As String()
 
         Public ReadOnly Property MountPointsString As String

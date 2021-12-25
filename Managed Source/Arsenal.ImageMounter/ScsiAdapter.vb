@@ -1,7 +1,7 @@
 ﻿''''' ScsiAdapter.vb
 ''''' Class for controlling Arsenal Image Mounter Devices.
 ''''' 
-''''' Copyright (c) 2012-2020, Arsenal Consulting, Inc. (d/b/a Arsenal Recon) <http://www.ArsenalRecon.com>
+''''' Copyright (c) 2012-2021, Arsenal Consulting, Inc. (d/b/a Arsenal Recon) <http://www.ArsenalRecon.com>
 ''''' This source code and API are available under the terms of the Affero General Public
 ''''' License v3.
 '''''
@@ -10,11 +10,16 @@
 ''''' Questions, comments, or requests for clarification: http://ArsenalRecon.com/contact/
 '''''
 
+Imports System.ComponentModel
 Imports System.Diagnostics.CodeAnalysis
+Imports System.IO
+Imports System.Runtime.InteropServices
+Imports System.Text
+Imports System.Threading
 Imports System.Threading.Tasks
 Imports Arsenal.ImageMounter.Extensions
 Imports Arsenal.ImageMounter.IO
-
+Imports Microsoft.Win32.SafeHandles
 
 ''' <summary>
 ''' Represents Arsenal Image Mounter objects.
@@ -144,13 +149,29 @@ Public Class ScsiAdapter
 
     End Function
 
+    Private NotInheritable Class AdapterDeviceInstance
+
+        Public ReadOnly Property DevInstName As String
+
+        Public ReadOnly Property DevInst As UInteger
+
+        Public ReadOnly Property SafeHandle As SafeFileHandle
+
+        Public Sub New(devInstName As String, devInst As UInteger, safeHhandle As SafeFileHandle)
+            _DevInstName = devInstName
+            _DevInst = devInst
+            _SafeHandle = safeHhandle
+        End Sub
+
+    End Class
+
     ''' <summary>
     ''' Retrieves a handle to first found adapter, or null if error occurs.
     ''' </summary>
     ''' <remarks>Arsenal Image Mounter does not currently support more than one adapter.</remarks>
-    ''' <returns>A structure containing SCSI port number and an open handle to first found
+    ''' <returns>An object containing devinst value and an open handle to first found
     ''' compatible adapter.</returns>
-    Private Shared Function OpenAdapter() As Tuple(Of String, UInteger, SafeFileHandle)
+    Private Shared Function OpenAdapter() As AdapterDeviceInstance
 
         Dim devinstNames = API.EnumerateAdapterDeviceInstanceNames()
 
@@ -163,9 +184,11 @@ Public Class ScsiAdapter
         Dim found = Aggregate devInstName In devinstNames
                     Let devinst = NativeFileIO.GetDevInst(devInstName)
                     Where devinst.HasValue
-                    Let path = NativeFileIO.GetPhysicalDeviceObjectName(devinst.Value)
+                    Let path = NativeFileIO.GetPhysicalDeviceObjectNtPath(devinst.Value)
                     Where path IsNot Nothing
                     Let handle = OpenAdapterHandle(path, devinst.Value)
+                    Where handle IsNot Nothing
+                    Select New AdapterDeviceInstance(devInstName, devinst.Value, handle)
                     Into FirstOrDefault()
 
         If found Is Nothing Then
@@ -174,7 +197,7 @@ Public Class ScsiAdapter
 
         End If
 
-        Return Tuple.Create(found.devInstName, found.devinst.Value, found.handle)
+        Return found
 
     End Function
 
@@ -186,13 +209,13 @@ Public Class ScsiAdapter
 
     End Sub
 
-    Private Sub New(OpenAdapterHandle As Tuple(Of String, UInteger, SafeFileHandle))
-        MyBase.New(OpenAdapterHandle.Item3, FileAccess.ReadWrite)
+    Private Sub New(OpenAdapterHandle As AdapterDeviceInstance)
+        MyBase.New(OpenAdapterHandle.SafeHandle, FileAccess.ReadWrite)
 
-        _DeviceInstance = OpenAdapterHandle.Item2
-        _DeviceInstanceName = OpenAdapterHandle.Item1
+        _DeviceInstance = OpenAdapterHandle.DevInst
+        _DeviceInstanceName = OpenAdapterHandle.DevInstName
 
-        Trace.WriteLine($"Successfully opened SCSI adapter '{OpenAdapterHandle.Item1}'.")
+        Trace.WriteLine($"Successfully opened SCSI adapter '{OpenAdapterHandle.DevInstName}'.")
     End Sub
 
     ''' <summary>
@@ -615,7 +638,7 @@ Public Class ScsiAdapter
                                                       BitConverter.GetBytes(DeviceNumber),
                                                       ReturnCode)
 
-        If ReturnCode = NativeFileIO.UnsafeNativeMethods.STATUS_OBJECT_NAME_NOT_FOUND Then ' Device already removed
+        If ReturnCode = NativeFileIO.NativeConstants.STATUS_OBJECT_NAME_NOT_FOUND Then ' Device already removed
             Return
         ElseIf ReturnCode <> 0 Then
             Throw NativeFileIO.GetExceptionForNtStatus(ReturnCode)
@@ -645,11 +668,11 @@ Public Class ScsiAdapter
     ''' <param name="Filename">Name of disk image file holding storage for file type virtual disk or used to create a
     ''' virtual memory type virtual disk.</param>
     Public Sub QueryDevice(DeviceNumber As UInt32,
-                           ByRef DiskSize As Int64,
-                           ByRef BytesPerSector As UInt32,
-                           ByRef ImageOffset As Int64,
-                           ByRef Flags As DeviceFlags,
-                           ByRef Filename As String)
+                           <Out> ByRef DiskSize As Int64,
+                           <Out> ByRef BytesPerSector As UInt32,
+                           <Out> ByRef ImageOffset As Int64,
+                           <Out> ByRef Flags As DeviceFlags,
+                           <Out> ByRef Filename As String)
 
         QueryDevice(DeviceNumber, DiskSize, BytesPerSector, ImageOffset, Flags, Filename, WriteOverlayImagefile:=Nothing)
 
@@ -669,12 +692,12 @@ Public Class ScsiAdapter
     ''' virtual memory type virtual disk.</param>
     ''' <param name="WriteOverlayImagefile">Path to differencing file used in write-temporary mode.</param>
     Public Sub QueryDevice(DeviceNumber As UInt32,
-                           ByRef DiskSize As Int64,
-                           ByRef BytesPerSector As UInt32,
-                           ByRef ImageOffset As Int64,
-                           ByRef Flags As DeviceFlags,
-                           ByRef Filename As String,
-                           ByRef WriteOverlayImagefile As String)
+                           <Out> ByRef DiskSize As Int64,
+                           <Out> ByRef BytesPerSector As UInt32,
+                           <Out> ByRef ImageOffset As Int64,
+                           <Out> ByRef Flags As DeviceFlags,
+                           <Out> ByRef Filename As String,
+                           <Out> ByRef WriteOverlayImagefile As String)
 
         Dim Request As New BufferedBinaryWriter
         Request.Write(DeviceNumber)
@@ -767,8 +790,8 @@ Public Class ScsiAdapter
     ''' </summary>
     ''' <param name="DeviceNumber">Device number of virtual disk to modify.</param>
     ''' <param name="ExtendSize">Number of bytes to extend.</param>
-    Public Sub ChangeFlags(DeviceNumber As UInt32,
-                           ExtendSize As Int64)
+    Public Sub ExtendSize(DeviceNumber As UInt32,
+                          ExtendSize As Int64)
 
         Dim Request As New BufferedBinaryWriter
         Request.Write(DeviceNumber)
@@ -951,19 +974,50 @@ Public Class ScsiAdapter
     End Function
 
     ''' <summary>
+    ''' Opens a DiskDevice object for specified device number. Device numbers are created when
+    ''' a new virtual disk is created and returned in a reference parameter to CreateDevice
+    ''' method. This overload requests a DiskDevice object without read or write access, that
+    ''' can only be used to query metadata such as size, geometry, SCSI address etc.
+    ''' </summary>
+    Public Function OpenDevice(DeviceNumber As UInteger) As DiskDevice
+
+        Try
+            Dim device_name = GetDeviceName(DeviceNumber)
+
+            If device_name Is Nothing Then
+                Throw New DriveNotFoundException($"No drive found for device number {DeviceNumber:X6}")
+            End If
+
+            Return New DiskDevice($"\\?\{device_name}")
+
+        Catch ex As Exception
+            Throw New DriveNotFoundException($"Device {DeviceNumber:X6} is not ready", ex)
+
+        End Try
+
+    End Function
+
+    ''' <summary>
     ''' Returns a PhysicalDrive or CdRom device name for specified device number. Device numbers
     ''' are created when a new virtual disk is created and returned in a reference parameter to
     ''' CreateDevice method.
     ''' </summary>
     Public Function GetDeviceName(DeviceNumber As UInteger) As String
 
-        Dim raw_device = GetRawDeviceName(DeviceNumber)
+        Try
+            Dim raw_device = GetRawDeviceName(DeviceNumber)
 
-        If raw_device Is Nothing Then
+            If raw_device Is Nothing Then
+                Return Nothing
+            End If
+
+            Return NativeFileIO.GetPhysicalDriveNameForNtDevice(raw_device)
+
+        Catch ex As Exception
+            Trace.WriteLine($"Error getting device name for device number {DeviceNumber}: {ex.JoinMessages()}")
             Return Nothing
-        End If
 
-        Return NativeFileIO.GetPhysicalDrivePathForNtDevice(raw_device)
+        End Try
 
     End Function
 

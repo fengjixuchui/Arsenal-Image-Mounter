@@ -4,6 +4,7 @@ Imports System.Runtime.InteropServices
 Imports Arsenal.ImageMounter.PSDisk
 Imports Arsenal.ImageMounter.IO
 Imports Arsenal.ImageMounter.Extensions
+Imports System.IO
 
 Namespace PSDisk
 
@@ -45,14 +46,16 @@ Namespace PSDisk
                                 .DeviceName = getid(dev)
                             }
 
+                            view.FakeDiskSignature = dev.Flags.HasFlag(DeviceFlags.FakeDiskSignatureIfZero)
+
                             If view.DeviceName IsNot Nothing Then
                                 Try
                                     view.DevicePath = $"\\?\{view.DeviceName}"
                                     Using device As New DiskDevice(view.DevicePath, FileAccess.Read)
                                         view.RawDiskSignature = device.DiskSignature
-                                        view.FakeDiskSignature = dev.Flags.HasFlag(DeviceFlags.FakeDiskSignatureIfZero)
                                         view.NativePropertyDiskOffline = device.DiskPolicyOffline
                                         view.NativePropertyDiskReadOnly = device.DiskPolicyReadOnly
+                                        view.StorageDeviceNumber = device.StorageDeviceNumber
                                         Dim drive_layout = device.DriveLayoutEx
                                         view.DiskId = TryCast(drive_layout, NativeFileIO.DriveLayoutInformationGPT)?.GPT.DiskId
                                         If device.HasValidPartitionTable Then
@@ -69,7 +72,7 @@ Namespace PSDisk
 
                                 Try
                                     view.Volumes = NativeFileIO.EnumerateDiskVolumes(view.DevicePath).ToArray()
-                                    view.MountPoints = view.Volumes.SelectMany(AddressOf NativeFileIO.EnumerateVolumeMountPoints).ToArray()
+                                    view.MountPoints = view.Volumes?.SelectMany(AddressOf NativeFileIO.EnumerateVolumeMountPoints).ToArray()
 
                                 Catch ex As Exception
                                     Trace.WriteLine($"Error enumerating volumes for drive {view.DevicePath}: {ex.JoinMessages()}")

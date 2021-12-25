@@ -34,15 +34,21 @@
     <ClCompile Include="partialirp.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="ioctldbg.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="workerthread.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="aimwrfltr.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="fltstats.h">
+    <ClInclude Include="..\phdskmnt\inc\phdskmntver.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="..\phdskmnt\inc\phdskmntver.h">
+    <ClInclude Include="inc\fltstats.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

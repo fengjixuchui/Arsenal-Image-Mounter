@@ -19,6 +19,7 @@ HANDLE AIMWrFltrParametersKey = NULL;
 PKEVENT AIMWrFltrDiffFullEvent = NULL;
 PDRIVER_OBJECT AIMWrFltrDriverObject = NULL;
 bool AIMWrFltrLinksCreated = false;
+bool QueueWithoutCache = false;
 
 //
 // Define the sections that allow for discarding (i.e. paging) some of
@@ -30,10 +31,12 @@ bool AIMWrFltrLinksCreated = false;
 #pragma alloc_text (PAGE, AIMWrFltrCreate)
 #pragma alloc_text (PAGE, AIMWrFltrAddDevice)
 #pragma alloc_text (PAGE, AIMWrFltrGetDiffDevicePath)
-#pragma alloc_text (PAGE, AIMWrFltrPnp)
 #pragma alloc_text (PAGE, AIMWrFltrStartDevice)
 #pragma alloc_text (PAGE, AIMWrFltrRemoveDevice)
+#ifndef DBG
+#pragma alloc_text (PAGE, AIMWrFltrPnp)
 #pragma alloc_text (PAGE, AIMWrFltrCleanupDevice)
+#endif
 #pragma alloc_text (PAGE, AIMWrFltrTrim)
 #pragma alloc_text (PAGE, AIMWrFltrDeviceUsageNotification)
 #pragma alloc_text (PAGE, AIMWrFltrForwardIrpSynchronous)
@@ -195,6 +198,23 @@ STATUS_SUCCESS if successful
 
         return STATUS_SUCCESS;
     }
+    
+    UNICODE_STRING queue_without_cache_str;
+    RtlInitUnicodeString(&queue_without_cache_str, L"QueueWithoutCache");
+    union
+    {
+        KEY_VALUE_PARTIAL_INFORMATION queue_without_cache_value;
+        UCHAR buffer[FIELD_OFFSET(KEY_VALUE_PARTIAL_INFORMATION, Data) + sizeof(ULONG)];
+    };
+    ULONG length;
+    status = ZwQueryValueKey(AIMWrFltrParametersKey, &queue_without_cache_str,
+        KeyValuePartialInformation, &queue_without_cache_value, sizeof(queue_without_cache_value), &length);
+
+    if (NT_SUCCESS(status))
+    {
+        QueueWithoutCache = *(bool*)queue_without_cache_value.Data;
+        DbgPrint("AIMWrFltr: QueueWithoutCache = 0x%X\n", QueueWithoutCache);
+    }
 
     //
     // Create dispatch points
@@ -247,7 +267,7 @@ AIMWrFltrSyncFilterWithTarget(IN PDEVICE_OBJECT FilterDevice,
     PAGED_CODE();
 
     //
-    // Propogate all useful flags from target to AIMWrFltr. MountMgr will look
+    // Propagate all useful flags from target to AIMWrFltr. MountMgr will look
     // at the AIMWrFltr object capabilities to figure out if the disk is
     // a removable and perhaps other things.
     //
@@ -312,10 +332,35 @@ AIMWrFltSaveDiffHeader(IN PDEVICE_EXTENSION DeviceExtension)
 VOID
 AIMWrFltrCleanupDevice(IN PDEVICE_EXTENSION DeviceExtension)
 {
+#ifndef DBG
     PAGED_CODE();
+#endif
 
     if (DeviceExtension->WorkerThread != NULL)
     {
+#if DBG
+
+        KIRQL current_irql = PASSIVE_LEVEL;
+        KLOCK_QUEUE_HANDLE lock_handle;
+        ULONG items_in_queue = 0;
+
+        AIMWrFltrAcquireLock(&DeviceExtension->ListLock, &lock_handle,
+            current_irql);
+
+        for (PLIST_ENTRY entry = DeviceExtension->ListHead.Flink;
+            entry != &DeviceExtension->ListHead;
+            entry = entry->Flink)
+        {
+            items_in_queue++;
+        }
+        
+        AIMWrFltrReleaseLock(&lock_handle, &current_irql);
+
+        DbgPrint("AIMWrFltrCleanupDevice: Shutting down worker thread with %i items in queue\n",
+            items_in_queue);
+
+#endif
+
         DeviceExtension->ShutdownThread = true;
         KeSetEvent(&DeviceExtension->ListEvent, 0, FALSE);
         ZwWaitForSingleObject(DeviceExtension->WorkerThread, FALSE, NULL);
@@ -498,12 +543,26 @@ AIMWrFltrSynchronousReadWrite(
 
     if (MajorFunction == IRP_MJ_WRITE)
     {
-        lower_irp->Flags |= IRP_WRITE_OPERATION | IRP_NOCACHE;
-        lower_io_stack->Flags |= SL_WRITE_THROUGH;
+        if (FileObject == NULL || (FileObject->Flags & FO_NO_INTERMEDIATE_BUFFERING) != 0)
+        {
+            lower_irp->Flags |= IRP_WRITE_OPERATION | IRP_NOCACHE;
+            lower_io_stack->Flags |= SL_WRITE_THROUGH;
+        }
+        else
+        {
+            lower_irp->Flags |= IRP_WRITE_OPERATION;
+        }
     }
     else if (MajorFunction == IRP_MJ_READ)
     {
-        lower_irp->Flags |= IRP_READ_OPERATION | IRP_NOCACHE;
+        if (FileObject == NULL || (FileObject->Flags & FO_NO_INTERMEDIATE_BUFFERING) != 0)
+        {
+            lower_irp->Flags |= IRP_READ_OPERATION | IRP_NOCACHE;
+        }
+        else
+        {
+            lower_irp->Flags |= IRP_READ_OPERATION;
+        }
     }
 
     KEVENT event;
@@ -528,8 +587,141 @@ AIMWrFltrSynchronousReadWrite(
 
     AIMWrFltrFreeIrpWithMdls(lower_irp);
 
+#ifdef DBG
+    if (!NT_SUCCESS(status) && MajorFunction == IRP_MJ_WRITE)
+    {
+        DbgPrint("AIMWrFltrSynchronousReadWrite: Failed 0x%X\n", status);
+    }
+#endif
+
     return status;
 }
+
+
+NTSTATUS
+AIMWrFltrReadDiffDeviceVbr(IN PDEVICE_EXTENSION DeviceExtension)
+{
+    // Read diff volume VBR
+    if (*(PULONGLONG)DeviceExtension->Statistics.DiffDeviceVbr.Raw.Bytes == 0)
+    {
+        LARGE_INTEGER lower_offset = { 0 };
+
+        IO_STATUS_BLOCK io_status;
+
+        NTSTATUS status = AIMWrFltrSynchronousReadWrite(
+            DeviceExtension->DiffDeviceObject,
+            DeviceExtension->DiffFileObject,
+            IRP_MJ_READ,
+            DeviceExtension->Statistics.DiffDeviceVbr.Raw.Bytes,
+            sizeof(DeviceExtension->Statistics.DiffDeviceVbr),
+            &lower_offset,
+            NULL,
+            &io_status);
+
+        if (!NT_SUCCESS(status) && status != STATUS_END_OF_FILE)
+        {
+            DbgPrint("AIMWrFltrReadDiffDeviceVbr: Error reading diff device for %p: 0x%X\n",
+                DeviceExtension->DeviceObject, status);
+
+            KdBreakPoint();
+
+            DeviceExtension->Statistics.LastErrorCode = status;
+
+            return status;
+        }
+
+        if (io_status.Information !=
+            sizeof(DeviceExtension->Statistics.DiffDeviceVbr))
+        {
+            RtlZeroMemory(
+                DeviceExtension->Statistics.DiffDeviceVbr.Raw.Bytes +
+                io_status.Information,
+                sizeof(DeviceExtension->Statistics.DiffDeviceVbr) -
+                io_status.Information);
+        }
+
+        // If this is the wrong file type = VBR magic mismatch
+        if (RtlCompareMemoryUlong(
+            DeviceExtension->Statistics.DiffDeviceVbr.Raw.Bytes,
+            sizeof(DeviceExtension->Statistics.DiffDeviceVbr), 0) !=
+            sizeof(DeviceExtension->Statistics.DiffDeviceVbr) &&
+            ((DeviceExtension->Statistics.DiffDeviceVbr.Fields.Foot.
+                VbrSignature != vbr_signature) ||
+                !RtlEqualMemory(diff_file_magic,
+                    DeviceExtension->Statistics.DiffDeviceVbr.Fields.Head.
+                    Magic, sizeof(diff_file_magic)) ||
+                DeviceExtension->Statistics.DiffDeviceVbr.Fields.Head.
+                DiffBlockBits != DIFF_BLOCK_BITS))
+        {
+            DbgPrint("AIMWrFltrReadDiffDeviceVbr: Diff device VBR for %p is invalid.\n",
+                DeviceExtension->DeviceObject);
+
+            KdBreakPoint();
+
+            DeviceExtension->Statistics.LastErrorCode = STATUS_WRONG_VOLUME;
+
+            if (DeviceExtension->DiffDeviceHandle != NULL)
+            {
+                ZwClose(DeviceExtension->DiffDeviceHandle);
+                DeviceExtension->DiffDeviceHandle = NULL;
+            }
+
+            ObDereferenceObject(DeviceExtension->DiffFileObject);
+            DeviceExtension->DiffFileObject = NULL;
+            DeviceExtension->DiffDeviceObject = NULL;
+
+            return STATUS_WRONG_VOLUME;
+        }
+
+        if (DeviceExtension->Statistics.DiffDeviceVbr.Fields.Head.
+            MajorVersion != major_version)
+        {
+            DbgPrint("AIMWrFltrReadDiffDeviceVbr: Overwriting incompatible version. Found in VBR %i:%i, expected %i:%i.\n",
+                DeviceExtension->Statistics.DiffDeviceVbr.Fields.Head.
+                MajorVersion,
+                DeviceExtension->Statistics.DiffDeviceVbr.Fields.Head.
+                MinorVersion,
+                major_version,
+                minor_version);
+
+            RtlZeroMemory(DeviceExtension->Statistics.DiffDeviceVbr.Raw.Bytes,
+                sizeof(DeviceExtension->Statistics.DiffDeviceVbr));
+        }
+        else if (DeviceExtension->Statistics.DiffDeviceVbr.Fields.Head.
+            MinorVersion != minor_version)
+        {
+            DbgPrint("AIMWrFltrReadDiffDeviceVbr: Minor version mismatch. Found in VBR %i:%i, expected %i:%i.\n",
+                DeviceExtension->Statistics.DiffDeviceVbr.Fields.Head.
+                MajorVersion,
+                DeviceExtension->Statistics.DiffDeviceVbr.Fields.Head.
+                MinorVersion,
+                major_version,
+                minor_version);
+        }
+
+        RtlCopyMemory(DeviceExtension->Statistics.DiffDeviceVbr.Fields.Head.
+            Magic, diff_file_magic, sizeof(diff_file_magic));
+
+        DeviceExtension->Statistics.DiffDeviceVbr.Fields.Foot.VbrSignature =
+            vbr_signature;
+
+        DeviceExtension->Statistics.DiffDeviceVbr.Fields.Head.MajorVersion =
+            major_version;
+
+        DeviceExtension->Statistics.DiffDeviceVbr.Fields.Head.DiffBlockBits =
+            DIFF_BLOCK_BITS;
+
+        if (DeviceExtension->Statistics.DiffDeviceVbr.Fields.Head.
+            OffsetToAllocationTable == 0)
+        {
+            DeviceExtension->Statistics.DiffDeviceVbr.Fields.Head.
+                OffsetToAllocationTable = DIFF_BLOCK_SIZE;
+        }
+    }
+
+    return STATUS_SUCCESS;
+}
+
 
 NTSTATUS
 AIMWrFltrOpenDiffDevice(IN PDEVICE_EXTENSION DeviceExtension,
@@ -561,7 +753,7 @@ AIMWrFltrOpenDiffDevice(IN PDEVICE_EXTENSION DeviceExtension,
 
         status = ZwCreateFile(
             &DeviceExtension->DiffDeviceHandle,
-            GENERIC_READ | GENERIC_WRITE,
+            GENERIC_READ | GENERIC_WRITE | DELETE,
             &obj_attrs,
             &io_status,
             &allocation_size,
@@ -569,7 +761,7 @@ AIMWrFltrOpenDiffDevice(IN PDEVICE_EXTENSION DeviceExtension,
             FILE_SHARE_READ | FILE_SHARE_DELETE,
             FILE_OPEN_IF,
             FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT |
-            FILE_NO_INTERMEDIATE_BUFFERING,
+            FILE_NO_INTERMEDIATE_BUFFERING | FILE_RANDOM_ACCESS,
             NULL,
             0);
 
@@ -622,125 +814,7 @@ AIMWrFltrOpenDiffDevice(IN PDEVICE_EXTENSION DeviceExtension,
             &DeviceExtension->DiffFileObject->DeviceObject->DriverObject->DriverName));
     }
 
-    // Read diff volume VBR
-    if (*(PULONGLONG)DeviceExtension->Statistics.DiffDeviceVbr.Raw.Bytes == 0)
-    {
-        LARGE_INTEGER lower_offset = { 0 };
-
-        IO_STATUS_BLOCK io_status;
-
-        status = AIMWrFltrSynchronousReadWrite(
-            DeviceExtension->DiffDeviceObject,
-            DeviceExtension->DiffFileObject,
-            IRP_MJ_READ,
-            DeviceExtension->Statistics.DiffDeviceVbr.Raw.Bytes,
-            sizeof(DeviceExtension->Statistics.DiffDeviceVbr),
-            &lower_offset,
-            NULL,
-            &io_status);
-
-        if (!NT_SUCCESS(status) && status != STATUS_END_OF_FILE)
-        {
-            DbgPrint("AIMWrFltrInitializeDiffDevice: Error reading diff device for %p: 0x%X\n",
-                DeviceExtension->DeviceObject, status);
-
-            KdBreakPoint();
-
-            DeviceExtension->Statistics.LastErrorCode = status;
-
-            return status;
-        }
-
-        if (io_status.Information !=
-            sizeof(DeviceExtension->Statistics.DiffDeviceVbr))
-        {
-            RtlZeroMemory(
-                DeviceExtension->Statistics.DiffDeviceVbr.Raw.Bytes +
-                io_status.Information,
-                sizeof(DeviceExtension->Statistics.DiffDeviceVbr) -
-                io_status.Information);
-        }
-
-        // If this is the wrong file type = VBR magic mismatch
-        if (RtlCompareMemoryUlong(
-            DeviceExtension->Statistics.DiffDeviceVbr.Raw.Bytes,
-            sizeof(DeviceExtension->Statistics.DiffDeviceVbr), 0) !=
-            sizeof(DeviceExtension->Statistics.DiffDeviceVbr) &&
-            ((DeviceExtension->Statistics.DiffDeviceVbr.Fields.Foot.
-                VbrSignature != vbr_signature) ||
-                !RtlEqualMemory(diff_file_magic,
-                    DeviceExtension->Statistics.DiffDeviceVbr.Fields.Head.
-                    Magic, sizeof(diff_file_magic)) ||
-                DeviceExtension->Statistics.DiffDeviceVbr.Fields.Head.
-                DiffBlockBits != DIFF_BLOCK_BITS))
-        {
-            DbgPrint("AIMWrFltrInitializeDiffDevice: Diff device VBR for %p is invalid.\n",
-                DeviceExtension->DeviceObject);
-
-            KdBreakPoint();
-
-            DeviceExtension->Statistics.LastErrorCode = STATUS_WRONG_VOLUME;
-
-            if (DeviceExtension->DiffDeviceHandle != NULL)
-            {
-                ZwClose(DeviceExtension->DiffDeviceHandle);
-                DeviceExtension->DiffDeviceHandle = NULL;
-            }
-
-            ObDereferenceObject(DeviceExtension->DiffFileObject);
-            DeviceExtension->DiffFileObject = NULL;
-            DeviceExtension->DiffDeviceObject = NULL;
-
-            return STATUS_WRONG_VOLUME;
-        }
-        
-        if (DeviceExtension->Statistics.DiffDeviceVbr.Fields.Head.
-            MajorVersion != major_version)
-        {
-            DbgPrint("AIMWrFltrInitializeDiffDevice: Overwriting incompatible version. Found in VBR %i:%i, expected %i:%i.\n",
-                DeviceExtension->Statistics.DiffDeviceVbr.Fields.Head.
-                MajorVersion,
-                DeviceExtension->Statistics.DiffDeviceVbr.Fields.Head.
-                MinorVersion,
-                major_version,
-                minor_version);
-
-            RtlZeroMemory(DeviceExtension->Statistics.DiffDeviceVbr.Raw.Bytes,
-                sizeof(DeviceExtension->Statistics.DiffDeviceVbr));
-        }
-        else if (DeviceExtension->Statistics.DiffDeviceVbr.Fields.Head.
-            MinorVersion != minor_version)
-        {
-            DbgPrint("AIMWrFltrInitializeDiffDevice: Minor version mismatch. Found in VBR %i:%i, expected %i:%i.\n",
-                DeviceExtension->Statistics.DiffDeviceVbr.Fields.Head.
-                MajorVersion,
-                DeviceExtension->Statistics.DiffDeviceVbr.Fields.Head.
-                MinorVersion,
-                major_version,
-                minor_version);
-        }
-
-        RtlCopyMemory(DeviceExtension->Statistics.DiffDeviceVbr.Fields.Head.
-            Magic, diff_file_magic, sizeof(diff_file_magic));
-
-        DeviceExtension->Statistics.DiffDeviceVbr.Fields.Foot.VbrSignature =
-            vbr_signature;
-
-        DeviceExtension->Statistics.DiffDeviceVbr.Fields.Head.MajorVersion =
-            major_version;
-
-        DeviceExtension->Statistics.DiffDeviceVbr.Fields.Head.DiffBlockBits =
-            DIFF_BLOCK_BITS;
-
-        if (DeviceExtension->Statistics.DiffDeviceVbr.Fields.Head.
-            OffsetToAllocationTable == 0)
-        {
-            DeviceExtension->Statistics.DiffDeviceVbr.Fields.Head.
-                OffsetToAllocationTable = DIFF_BLOCK_SIZE;
-        }
-    }
-
-    return STATUS_SUCCESS;
+    return AIMWrFltrReadDiffDeviceVbr(DeviceExtension);
 }
 
 NTSTATUS
@@ -754,7 +828,7 @@ AIMWrFltrInitializePhDskMntDiffDevice(IN PDEVICE_EXTENSION DeviceExtension,
     if (DeviceExtension->DiffFileObject == NULL)
     {
         KdPrint((
-            "AIMWrFltrOpenDiffDevice: Attempting to duplicate handle %p as diff device for %p.\n",
+            "AIMWrFltrInitializePhDskMntDiffDevice: Attempting to duplicate handle %p as diff device for %p.\n",
             DiffDeviceHandle, DeviceExtension->DeviceObject));
 
         // Open diff file and make sure the file system where it is
@@ -787,7 +861,7 @@ AIMWrFltrInitializePhDskMntDiffDevice(IN PDEVICE_EXTENSION DeviceExtension,
         if (!NT_SUCCESS(status))
         {
             DbgPrint(
-                "AIMWrFltrOpenDiffDevice: Duplicate failed for handle %p status 0x%X.\n",
+                "AIMWrFltrInitializePhDskMntDiffDevice: Duplicate failed for handle %p status 0x%X.\n",
                 DiffDeviceHandle,
                 status);
 
@@ -801,11 +875,11 @@ AIMWrFltrInitializePhDskMntDiffDevice(IN PDEVICE_EXTENSION DeviceExtension,
         __analysis_assume(file_object != NULL);
 
         DbgPrint(
-            "AIMWrFltrOpenDiffDevice: Successfully duplicated handle %p as diff device.\n",
+            "AIMWrFltrInitializePhDskMntDiffDevice: Successfully duplicated handle %p as diff device.\n",
             DiffDeviceHandle);
 
         KdPrint((
-            "AIMWrFltrOpenDiffDevice: Successfully opened device diff device for %p. Diff volume FS driver '%wZ'.\n",
+            "AIMWrFltrInitializePhDskMntDiffDevice: Successfully opened device diff device for %p. Diff volume FS driver '%wZ'.\n",
             DeviceExtension->DeviceObject,
             &(file_object->Vpb != NULL && file_object->Vpb->DeviceObject != NULL ?
                 file_object->Vpb->DeviceObject : file_object->DeviceObject)->DriverObject->DriverName));
@@ -815,126 +889,15 @@ AIMWrFltrInitializePhDskMntDiffDevice(IN PDEVICE_EXTENSION DeviceExtension,
         DeviceExtension->DiffFileObject = file_object;
 
         KdPrint((
-            "AIMWrFltrInitializeDiffDevice: Diff device driver: '%wZ'\n",
+            "AIMWrFltrInitializePhDskMntDiffDevice: Diff device driver: '%wZ'\n",
             &DeviceExtension->DiffFileObject->DeviceObject->DriverObject->DriverName));
     }
 
-    // Read diff volume VBR
-    if (*(PULONGLONG)DeviceExtension->Statistics.DiffDeviceVbr.Raw.Bytes == 0)
+    status = AIMWrFltrReadDiffDeviceVbr(DeviceExtension);
+
+    if (!NT_SUCCESS(status))
     {
-        LARGE_INTEGER lower_offset = { 0 };
-
-        IO_STATUS_BLOCK io_status;
-
-        status = AIMWrFltrSynchronousReadWrite(
-            DeviceExtension->DiffDeviceObject,
-            DeviceExtension->DiffFileObject,
-            IRP_MJ_READ,
-            DeviceExtension->Statistics.DiffDeviceVbr.Raw.Bytes,
-            sizeof(DeviceExtension->Statistics.DiffDeviceVbr),
-            &lower_offset,
-            NULL,
-            &io_status);
-
-        if (!NT_SUCCESS(status) && status != STATUS_END_OF_FILE)
-        {
-            DbgPrint("AIMWrFltrInitializeDiffDevice: Error reading diff device for %p: 0x%X\n",
-                DeviceExtension->DeviceObject, status);
-
-            KdBreakPoint();
-
-            DeviceExtension->Statistics.LastErrorCode = status;
-
-            return status;
-        }
-
-        if (io_status.Information !=
-            sizeof(DeviceExtension->Statistics.DiffDeviceVbr))
-        {
-            RtlZeroMemory(
-                DeviceExtension->Statistics.DiffDeviceVbr.Raw.Bytes +
-                io_status.Information,
-                sizeof(DeviceExtension->Statistics.DiffDeviceVbr) -
-                io_status.Information);
-        }
-
-        // If this is the wrong file type = VBR magic mismatch
-        if (RtlCompareMemoryUlong(
-            DeviceExtension->Statistics.DiffDeviceVbr.Raw.Bytes,
-            sizeof(DeviceExtension->Statistics.DiffDeviceVbr), 0) !=
-            sizeof(DeviceExtension->Statistics.DiffDeviceVbr) &&
-            ((DeviceExtension->Statistics.DiffDeviceVbr.Fields.Foot.
-                VbrSignature != vbr_signature) ||
-                !RtlEqualMemory(diff_file_magic,
-                    DeviceExtension->Statistics.DiffDeviceVbr.Fields.Head.
-                    Magic, sizeof(diff_file_magic)) ||
-                DeviceExtension->Statistics.DiffDeviceVbr.Fields.Head.
-                DiffBlockBits != DIFF_BLOCK_BITS))
-        {
-            DbgPrint("AIMWrFltrInitializeDiffDevice: Diff device VBR for %p is invalid.\n",
-                DeviceExtension->DeviceObject);
-
-            KdBreakPoint();
-
-            DeviceExtension->Statistics.LastErrorCode = STATUS_WRONG_VOLUME;
-
-            if (DeviceExtension->DiffDeviceHandle != NULL)
-            {
-                ZwClose(DeviceExtension->DiffDeviceHandle);
-                DeviceExtension->DiffDeviceHandle = NULL;
-            }
-
-            ObDereferenceObject(DeviceExtension->DiffFileObject);
-            DeviceExtension->DiffFileObject = NULL;
-            DeviceExtension->DiffDeviceObject = NULL;
-
-            return STATUS_WRONG_VOLUME;
-        }
-
-        if (DeviceExtension->Statistics.DiffDeviceVbr.Fields.Head.
-            MajorVersion != major_version)
-        {
-            DbgPrint("AIMWrFltrInitializeDiffDevice: Overwriting incompatible version. Found in VBR %i:%i, expected %i:%i.\n",
-                DeviceExtension->Statistics.DiffDeviceVbr.Fields.Head.
-                MajorVersion,
-                DeviceExtension->Statistics.DiffDeviceVbr.Fields.Head.
-                MinorVersion,
-                major_version,
-                minor_version);
-
-            RtlZeroMemory(DeviceExtension->Statistics.DiffDeviceVbr.Raw.Bytes,
-                sizeof(DeviceExtension->Statistics.DiffDeviceVbr));
-        }
-        else if (DeviceExtension->Statistics.DiffDeviceVbr.Fields.Head.
-            MinorVersion != minor_version)
-        {
-            DbgPrint("AIMWrFltrInitializeDiffDevice: Minor version mismatch. Found in VBR %i:%i, expected %i:%i.\n",
-                DeviceExtension->Statistics.DiffDeviceVbr.Fields.Head.
-                MajorVersion,
-                DeviceExtension->Statistics.DiffDeviceVbr.Fields.Head.
-                MinorVersion,
-                major_version,
-                minor_version);
-        }
-
-        RtlCopyMemory(DeviceExtension->Statistics.DiffDeviceVbr.Fields.Head.
-            Magic, diff_file_magic, sizeof(diff_file_magic));
-
-        DeviceExtension->Statistics.DiffDeviceVbr.Fields.Foot.VbrSignature =
-            vbr_signature;
-
-        DeviceExtension->Statistics.DiffDeviceVbr.Fields.Head.MajorVersion =
-            major_version;
-
-        DeviceExtension->Statistics.DiffDeviceVbr.Fields.Head.DiffBlockBits =
-            DIFF_BLOCK_BITS;
-
-        if (DeviceExtension->Statistics.DiffDeviceVbr.Fields.Head.
-            OffsetToAllocationTable == 0)
-        {
-            DeviceExtension->Statistics.DiffDeviceVbr.Fields.Head.
-                OffsetToAllocationTable = DIFF_BLOCK_SIZE;
-        }
+        return status;
     }
 
     if (DeviceExtension->Statistics.DiffDeviceVbr.Fields.Head.Size.QuadPart ==
@@ -1258,23 +1221,8 @@ AIMWrFltrAddDevice(IN PDRIVER_OBJECT DriverObject,
                 (PWSTR)ph_obj_name, status);
         }
 
-        size_t max_chars = ph_obj_name.Count() - wcslen(ph_obj_name) - 2;
-
-        int i =
-#pragma warning(suppress: 28719)
-            _snwprintf((PWSTR)ph_obj_name + wcslen(ph_obj_name),
-                max_chars,
-                L"\\%i", bus_count);
-
-        if ((i < 0) || ((ULONG)i >= max_chars))
-        {
-            DbgPrint("AIMWrFltrAddDevice: Enumerator or class names are too long.\n");
-        }
-        else
-        {
-            DbgPrint("AIMWrFltrAddDevice for Enum\\Class\\Number: '%ws'\n",
-                (PWSTR)ph_obj_name);
-        }
+        DbgPrint("AIMWrFltrAddDevice for Enum\\Class\\Number: '%ws\\%i'\n",
+            (PWSTR)ph_obj_name, bus_count);
     }
 #endif
 
@@ -1513,6 +1461,23 @@ AIMWrFltrAddDevice(IN PDRIVER_OBJECT DriverObject,
     }
     else
     {
+        UNICODE_STRING non_removable_suffix;
+        RtlInitUnicodeString(&non_removable_suffix, L":$NonRemovable");
+
+        if (diff_device_path.Length > non_removable_suffix.Length)
+        {
+            UNICODE_STRING suffix;
+            suffix.MaximumLength = suffix.Length = non_removable_suffix.Length;
+            suffix.Buffer = (PWSTR)((PUCHAR)diff_device_path.Buffer + diff_device_path.Length - suffix.Length);
+
+            if (RtlEqualUnicodeString(&suffix, &non_removable_suffix, FALSE))
+            {
+                KdPrint(("aimwrfltr: Request to fake non-removable properties.\n"));
+                diff_device_path.Length -= suffix.Length;
+                device_extension->Statistics.FakeNonRemovable = TRUE;
+            }
+        }
+
         status = AIMWrFltrOpenDiffDevice(device_extension, &diff_device_path);
 
         buffer.Free();
@@ -1637,7 +1602,9 @@ NTSTATUS
     PDEVICE_EXTENSION device_extension = (PDEVICE_EXTENSION)DeviceObject->DeviceExtension;
     bool lockHeld = false;
 
+#ifndef DBG
     PAGED_CODE();
+#endif
 
     //KdPrint(("AIMWrFltrPnp: DeviceObject 0x%p Irp 0x%p\n",
     //    DeviceObject, Irp));
@@ -1717,7 +1684,28 @@ NTSTATUS
     }
     case IRP_MN_SURPRISE_REMOVAL:
     {
-        KdPrint(("AIMWrFltrPnp: Processing IRP_MN_SURPRISE_REMOVAL\n"));
+#if DBG
+
+        KIRQL current_irql = PASSIVE_LEVEL;
+        KLOCK_QUEUE_HANDLE lock_handle;
+        ULONG items_in_queue = 0;
+
+        AIMWrFltrAcquireLock(&device_extension->ListLock, &lock_handle,
+            current_irql);
+
+        for (PLIST_ENTRY entry = device_extension->ListHead.Flink;
+            entry != &device_extension->ListHead;
+            entry = entry->Flink)
+        {
+            items_in_queue++;
+        }
+
+        AIMWrFltrReleaseLock(&lock_handle, &current_irql);
+
+        DbgPrint("AIMWrFltrPnp: Processing IRP_MN_SURPRISE_REMOVAL with %i items in queue\n",
+            items_in_queue);
+
+#endif
 
         device_extension->SurpriseRemoveDeviceSent = true;
         device_extension->ShutdownThread = true;
@@ -2200,152 +2188,6 @@ VOID.
         ObDereferenceObject(AIMWrFltrDiffFullEvent);
         AIMWrFltrDiffFullEvent = NULL;
     }
-}
-
-
-void
-AIMWrFltrDeviceWorkerThread(PVOID Context)
-{
-    PDEVICE_EXTENSION device_extension = (PDEVICE_EXTENSION)Context;
-
-    KdPrint(("AIMWrFltr: Worker thread started for device %p\n",
-        device_extension->DeviceObject));
-
-    PUCHAR block_buffer = new UCHAR[DIFF_BLOCK_SIZE];
-
-    if (block_buffer == NULL)
-    {
-        PsTerminateSystemThread(STATUS_INSUFFICIENT_RESOURCES);
-        return;
-    }
-
-    PLIST_ENTRY request = &device_extension->ListHead;
-
-    for (;;)
-    {
-        KLOCK_QUEUE_HANDLE lock_handle;
-
-        KIRQL lowest_assumed_irql = PASSIVE_LEVEL;
-
-        AIMWrFltrAcquireLock(&device_extension->ListLock, &lock_handle,
-            lowest_assumed_irql);
-
-        if (request != &device_extension->ListHead)
-        {
-            RemoveEntryList(request);
-
-            delete CONTAINING_RECORD(request, CACHED_IRP, ListEntry);
-        }
-
-        request = device_extension->ListHead.Flink;
-
-        AIMWrFltrReleaseLock(&lock_handle, &lowest_assumed_irql);
-
-        if (request == &device_extension->ListHead &&
-            device_extension->ShutdownThread)
-        {
-            break;
-        }
-
-        if (!AIMWrFltrLinksCreated)
-        {
-            UNICODE_STRING event_path;
-            RtlInitUnicodeString(&event_path,
-                L"\\Device\\" AIMWRFLTR_DIFF_FULL_EVENT_NAME);
-
-            UNICODE_STRING event_link;
-            RtlInitUnicodeString(&event_link,
-                L"\\BaseNamedObjects\\Global\\"
-                AIMWRFLTR_DIFF_FULL_EVENT_NAME);
-
-            NTSTATUS status = IoCreateUnprotectedSymbolicLink(&event_link,
-                &event_path);
-
-            KdPrint(("AIMWrFltr:DeviceWorkerThread: Link creation status: %#x\n",
-                status));
-
-            if (NT_SUCCESS(status) ||
-                status == STATUS_OBJECT_NAME_COLLISION)
-            {
-                AIMWrFltrLinksCreated = true;
-            }
-        }
-
-        if (request == &device_extension->ListHead)
-        {
-            KeWaitForSingleObject(&device_extension->ListEvent, Executive,
-                KernelMode, FALSE, NULL);
-
-            continue;
-        }
-
-        PCACHED_IRP cached_irp = CONTAINING_RECORD(request, CACHED_IRP, ListEntry);
-
-        if (cached_irp->DeviceObject != NULL && cached_irp->Irp != NULL)
-        {
-            IoCallDriver(cached_irp->DeviceObject, cached_irp->Irp);
-        }
-        else
-        {
-            NTSTATUS status;
-            PIO_STACK_LOCATION io_stack = &cached_irp->IoStack;
-
-            switch (io_stack->MajorFunction)
-            {
-            case IRP_MJ_READ:
-                status = AIMWrFltrDeferredRead(device_extension, cached_irp->Irp, block_buffer);
-                break;
-
-            case IRP_MJ_WRITE:
-                status = AIMWrFltrDeferredWrite(device_extension, cached_irp, block_buffer);
-                break;
-
-            case IRP_MJ_FLUSH_BUFFERS:
-                status = AIMWrFltrDeferredFlushBuffers(device_extension, cached_irp);
-                break;
-
-            case IRP_MJ_DEVICE_CONTROL:
-                switch (io_stack->Parameters.DeviceIoControl.IoControlCode)
-                {
-#ifdef FSCTL_FILE_LEVEL_TRIM
-                case IOCTL_STORAGE_MANAGE_DATA_SET_ATTRIBUTES:
-                    status = AIMWrFltrDeferredManageDataSetAttributes(device_extension, cached_irp,
-                        block_buffer);
-
-                    break;
-#endif
-
-                default:
-                    status = STATUS_INTERNAL_ERROR;
-                    KdPrint(("AimWrFltrDeviceWorkerThread: Internal error.\n"));
-                    KdBreakPoint();
-#pragma warning(suppress: 4065)
-                }
-
-                break;
-
-            default:
-                status = STATUS_INTERNAL_ERROR;
-                KdPrint(("AimWrFltrDeviceWorkerThread: Internal error.\n"));
-                KdBreakPoint();
-            }
-
-            if (cached_irp->Irp != NULL)
-            {
-                cached_irp->Irp->IoStatus.Status = status;
-                IoCompleteRequest(cached_irp->Irp, IO_NO_INCREMENT);
-            }
-        }
-
-        IoReleaseRemoveLock(&device_extension->RemoveLock, cached_irp);
-    }
-
-    KdPrint(("AIMWrFltr: Terminating worker thread for device %p\n",
-        device_extension->DeviceObject));
-
-    delete[] block_buffer;
-
-    PsTerminateSystemThread(STATUS_SUCCESS);
 }
 
 void * __CRTDECL operator new(size_t Size)

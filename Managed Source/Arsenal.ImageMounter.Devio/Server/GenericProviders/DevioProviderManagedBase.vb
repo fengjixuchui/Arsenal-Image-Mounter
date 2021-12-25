@@ -1,7 +1,7 @@
 ﻿
 ''''' DevioProviderManagedBase.vb
 ''''' 
-''''' Copyright (c) 2012-2020, Arsenal Consulting, Inc. (d/b/a Arsenal Recon) <http://www.ArsenalRecon.com>
+''''' Copyright (c) 2012-2021, Arsenal Consulting, Inc. (d/b/a Arsenal Recon) <http://www.ArsenalRecon.com>
 ''''' This source code and API are available under the terms of the Affero General Public
 ''''' License v3.
 '''''
@@ -9,6 +9,8 @@
 ''''' proprietary exceptions.
 ''''' Questions, comments, or requests for clarification: http://ArsenalRecon.com/contact/
 '''''
+
+Imports System.Runtime.InteropServices
 
 Namespace Server.GenericProviders
 
@@ -22,12 +24,12 @@ Namespace Server.GenericProviders
         ''' <summary>
         ''' Event when object is about to be disposed
         ''' </summary>
-        Public Event Disposing As EventHandler
+        Public Event Disposing As EventHandler Implements IDevioProvider.Disposing
 
         ''' <summary>
         ''' Event when object has been disposed
         ''' </summary>
-        Public Event Disposed As EventHandler
+        Public Event Disposed As EventHandler Implements IDevioProvider.Disposed
 
         ''' <summary>
         ''' Determines whether virtual disk is writable or read-only.
@@ -68,9 +70,9 @@ Namespace Server.GenericProviders
         ''' <returns>Returns number of bytes read from device that were stored in byte array.</returns>
         Public MustOverride Function Read(buffer As Byte(), bufferoffset As Integer, count As Integer, fileoffset As Long) As Integer Implements IDevioProvider.Read
 
-        Private Function GetByteBuffer(size As Integer) As Byte()
+        Private ReadOnly _buffers As New List(Of WeakReference)
 
-            Static buffers As New List(Of WeakReference)
+        Private Function GetByteBuffer(size As Integer) As Byte()
 
 #If TRACE_PERFORMANCE Then
             Static tid As String = Thread.CurrentThread.ManagedThreadId.ToString()
@@ -81,7 +83,7 @@ Namespace Server.GenericProviders
             counter += 1
 #End If
 
-            Dim buffer = buffers.
+            Dim buffer = _buffers.
                 Select(Function(ref) TryCast(ref.Target, Byte())).
                 FirstOrDefault(Function(buf) buf IsNot Nothing AndAlso buf.Length >= size)
 
@@ -93,11 +95,11 @@ Namespace Server.GenericProviders
 
                 buffer = New Byte(0 To size - 1) {}
 
-                Dim wr = buffers.FirstOrDefault(Function(ref) Not ref.IsAlive)
+                Dim wr = _buffers.FirstOrDefault(Function(ref) Not ref.IsAlive)
 
                 If wr Is Nothing Then
 
-                    buffers.Add(New WeakReference(buffer))
+                    _buffers.Add(New WeakReference(buffer))
 
                 Else
 
@@ -159,13 +161,13 @@ Namespace Server.GenericProviders
 
         End Sub
 
-        Private disposedValue As Boolean ' To detect redundant calls
+        Public ReadOnly Property IsDisposed As Boolean ' To detect redundant calls
 
         ' IDisposable
         Protected Overridable Sub Dispose(disposing As Boolean)
             OnDisposing(EventArgs.Empty)
 
-            If Not Me.disposedValue Then
+            If Not _IsDisposed Then
                 If disposing Then
                     ' TODO: dispose managed state (managed objects).
                 End If
@@ -173,7 +175,7 @@ Namespace Server.GenericProviders
                 ' TODO: free unmanaged resources (unmanaged objects) and override Finalize() below.
                 ' TODO: set large fields to null.
             End If
-            Me.disposedValue = True
+            _IsDisposed = True
 
             OnDisposed(EventArgs.Empty)
         End Sub

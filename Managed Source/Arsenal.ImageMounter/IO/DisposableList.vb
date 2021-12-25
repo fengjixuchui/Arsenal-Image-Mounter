@@ -1,4 +1,5 @@
 Imports System.Diagnostics.CodeAnalysis
+Imports System.Runtime.InteropServices
 
 Namespace IO
 
@@ -7,7 +8,6 @@ Namespace IO
     ''' object in the list when the list is disposed.
     ''' </summary>
     <ComVisible(False)>
-    <SuppressMessage("Naming", "CA1710:Identifiers should have correct suffix")>
     Public Class DisposableList
         Inherits DisposableList(Of IDisposable)
 
@@ -34,29 +34,24 @@ Namespace IO
     ''' </summary>
     ''' <typeparam name="T">Type of elements in list. Type needs to implement IDisposable interface.</typeparam>
     <ComVisible(False)>
-    <SuppressMessage("Naming", "CA1710:Identifiers should have correct suffix")>
     Public Class DisposableList(Of T As IDisposable)
         Inherits List(Of T)
 
         Implements IDisposable
 
-        Private disposedValue As Boolean    ' To detect redundant calls
-
         ' IDisposable
         Protected Overridable Sub Dispose(disposing As Boolean)
-            If Not Me.disposedValue Then
-                If disposing Then
-                    ' TODO: free managed resources when explicitly called
-                    For Each obj In Me
-                        obj.Dispose()
-                    Next
-                End If
+
+            If disposing Then
+                '' Dispose each object in list
+                For Each obj In Me
+                    obj?.Dispose()
+                Next
             End If
-            Me.disposedValue = True
 
-            ' TODO: free shared unmanaged resources
-
+            '' Clear list
             Clear()
+
         End Sub
 
         ' This code added by Visual Basic to correctly implement the disposable pattern.
@@ -64,11 +59,6 @@ Namespace IO
             ' Do not change this code.  Put cleanup code in Dispose(disposing As Boolean) above.
             Dispose(True)
             GC.SuppressFinalize(Me)
-        End Sub
-
-        Protected Overrides Sub Finalize()
-            Dispose(False)
-            MyBase.Finalize()
         End Sub
 
         Public Sub New()

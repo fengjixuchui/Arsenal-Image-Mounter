@@ -5,7 +5,7 @@
 /// queuing work items for requests that need to be carried out at
 /// PASSIVE_LEVEL.
 /// 
-/// Copyright (c) 2012-2020, Arsenal Consulting, Inc. (d/b/a Arsenal Recon) <http://www.ArsenalRecon.com>
+/// Copyright (c) 2012-2021, Arsenal Consulting, Inc. (d/b/a Arsenal Recon) <http://www.ArsenalRecon.com>
 /// This source code and API are available under the terms of the Affero General Public
 /// License v3.
 ///
@@ -1902,14 +1902,14 @@ __inout __deref PKIRQL              LowestAssumedIrql
         &pHBAExt->LUListLock, &LockHandle, *LowestAssumedIrql);
 
     for (count = 0, list_ptr = pHBAExt->LUList.Flink;
-        (count < MAX_LUNS) & (list_ptr != &pHBAExt->LUList);
+        (count < MAX_LUNS) && (list_ptr != &pHBAExt->LUList);
         list_ptr = list_ptr->Flink
         )
     {
         pHW_LU_EXTENSION object;
         object = CONTAINING_RECORD(list_ptr, HW_LU_EXTENSION, List);
 
-        if ((object->DeviceNumber.PathId == pSrb->PathId) &
+        if ((object->DeviceNumber.PathId == pSrb->PathId) &&
             (object->DeviceNumber.TargetId == pSrb->TargetId))
             if (pSrb->DataTransferLength >= FIELD_OFFSET(LUN_LIST, Lun) + (sizeof(pLunList->Lun[0])*count))
                 pLunList->Lun[count++][1] = object->DeviceNumber.Lun;

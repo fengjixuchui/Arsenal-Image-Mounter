@@ -2,7 +2,7 @@
 /// aimcmd.cpp
 /// Command line access to Arsenal Image Mounter features.
 /// 
-/// Copyright (c) 2012-2020, Arsenal Consulting, Inc. (d/b/a Arsenal Recon) <http://www.ArsenalRecon.com>
+/// Copyright (c) 2012-2021, Arsenal Consulting, Inc. (d/b/a Arsenal Recon) <http://www.ArsenalRecon.com>
 /// This source code and API are available under the terms of the Affero General Public
 /// License v3.
 ///
@@ -403,7 +403,7 @@ NextWaitChar(char *chr)
 void
 PrintLastError(LPCWSTR Prefix)
 {
-    LPSTR MsgBuf;
+    LPSTR MsgBuf = NULL;
 
     if (!FormatMessageA(FORMAT_MESSAGE_MAX_WIDTH_MASK |
         FORMAT_MESSAGE_ALLOCATE_BUFFER |
@@ -513,8 +513,8 @@ LPWSTR FormatOptions)
     }
 
     // Physical memory allocation requires the AWEAlloc driver.
-    if (((IMSCSI_TYPE(Flags) == IMSCSI_TYPE_FILE) |
-        (IMSCSI_TYPE(Flags) == 0)) &
+    if (((IMSCSI_TYPE(Flags) == IMSCSI_TYPE_FILE) ||
+        (IMSCSI_TYPE(Flags) == 0)) &&
         (IMSCSI_FILE_TYPE(Flags) == IMSCSI_FILE_TYPE_AWEALLOC))
     {
         HANDLE awealloc;
@@ -568,8 +568,8 @@ LPWSTR FormatOptions)
         }
     }
     // Proxy reconnection types requires the user mode service.
-    else if ((IMSCSI_TYPE(Flags) == IMSCSI_TYPE_PROXY) &
-        ((IMSCSI_PROXY_TYPE(Flags) == IMSCSI_PROXY_TYPE_TCP) |
+    else if ((IMSCSI_TYPE(Flags) == IMSCSI_TYPE_PROXY) &&
+        ((IMSCSI_PROXY_TYPE(Flags) == IMSCSI_PROXY_TYPE_TCP) ||
         (IMSCSI_PROXY_TYPE(Flags) == IMSCSI_PROXY_TYPE_COMM)))
     {
         if (!WaitNamedPipe(IMDPROXY_SVC_PIPE_DOSDEV_NAME, 0))
@@ -632,7 +632,7 @@ LPWSTR FormatOptions)
             return IMSCSI_CLI_ERROR_FATAL;
         }
     }
-    else if ((IMSCSI_TYPE(Flags) == IMSCSI_TYPE_PROXY) &
+    else if ((IMSCSI_TYPE(Flags) == IMSCSI_TYPE_PROXY) &&
         (IMSCSI_PROXY_TYPE(Flags) == IMSCSI_PROXY_TYPE_SHM))
     {
         LPWSTR namespace_prefix;
@@ -851,6 +851,8 @@ LPWSTR FormatOptions)
 
         return IMSCSI_CLI_SUCCESS;
     }
+
+    printf("Device is %ws\n", (LPCWSTR)dev_path);
 
     if (!dev_path)
     {
@@ -1942,7 +1944,7 @@ wmain(int argc, LPWSTR argv[])
             "\n"
             "Version " PHDSKMNT_RC_VERSION_STR " - (Compiled " __DATE__ ")\n"
             "\n"
-            "Copyright (C) 2012-2020 Arsenal Recon.\n"
+            "Copyright (C) 2012-2021 Arsenal Recon.\n"
             "\n"
             "\n"
             "http://www.ArsenalRecon.com\n"
@@ -2098,8 +2100,8 @@ wmain(int argc, LPWSTR argv[])
                 break;
 
             case L't':
-                if ((op_mode != OP_MODE_CREATE) |
-                    (argc < 2) |
+                if ((op_mode != OP_MODE_CREATE) ||
+                    (argc < 2) ||
                     (IMSCSI_TYPE(flags) != 0))
                     ImScsiSyntaxHelp();
 
@@ -2121,7 +2123,7 @@ wmain(int argc, LPWSTR argv[])
                 break;
 
             case L'o':
-                if (((op_mode != OP_MODE_CREATE) & (op_mode != OP_MODE_EDIT)) |
+                if (((op_mode != OP_MODE_CREATE) && (op_mode != OP_MODE_EDIT)) ||
                     (argc < 2))
                     ImScsiSyntaxHelp();
 
@@ -2201,7 +2203,7 @@ wmain(int argc, LPWSTR argv[])
                         }
                         else if (wcscmp(opt, L"ip") == 0)
                         {
-                            if ((IMSCSI_TYPE(flags) != IMSCSI_TYPE_PROXY) |
+                            if ((IMSCSI_TYPE(flags) != IMSCSI_TYPE_PROXY) ||
                                 (IMSCSI_PROXY_TYPE(flags) != IMSCSI_PROXY_TYPE_DIRECT))
                                 ImScsiSyntaxHelp();
 
@@ -2210,7 +2212,7 @@ wmain(int argc, LPWSTR argv[])
                         }
                         else if (wcscmp(opt, L"comm") == 0)
                         {
-                            if ((IMSCSI_TYPE(flags) != IMSCSI_TYPE_PROXY) |
+                            if ((IMSCSI_TYPE(flags) != IMSCSI_TYPE_PROXY) ||
                                 (IMSCSI_PROXY_TYPE(flags) != IMSCSI_PROXY_TYPE_DIRECT))
                                 ImScsiSyntaxHelp();
 
@@ -2219,7 +2221,7 @@ wmain(int argc, LPWSTR argv[])
                         }
                         else if (wcscmp(opt, L"shm") == 0)
                         {
-                            if ((IMSCSI_TYPE(flags) != IMSCSI_TYPE_PROXY) |
+                            if ((IMSCSI_TYPE(flags) != IMSCSI_TYPE_PROXY) ||
                                 (IMSCSI_PROXY_TYPE(flags) != IMSCSI_PROXY_TYPE_DIRECT))
                                 ImScsiSyntaxHelp();
 
@@ -2227,8 +2229,8 @@ wmain(int argc, LPWSTR argv[])
                         }
                         else if (wcscmp(opt, L"awe") == 0)
                         {
-                            if (((IMSCSI_TYPE(flags) != IMSCSI_TYPE_FILE) &
-                                (IMSCSI_TYPE(flags) != 0)) |
+                            if (((IMSCSI_TYPE(flags) != IMSCSI_TYPE_FILE) &&
+                                (IMSCSI_TYPE(flags) != 0)) ||
                                 (IMSCSI_FILE_TYPE(flags) != 0))
                                 ImScsiSyntaxHelp();
 
@@ -2236,8 +2238,8 @@ wmain(int argc, LPWSTR argv[])
                         }
                         else if (wcscmp(opt, L"par") == 0)
                         {
-                            if (((IMSCSI_TYPE(flags) != IMSCSI_TYPE_FILE) &
-                                (IMSCSI_TYPE(flags) != 0)) |
+                            if (((IMSCSI_TYPE(flags) != IMSCSI_TYPE_FILE) &&
+                                (IMSCSI_TYPE(flags) != 0)) ||
                                 (IMSCSI_FILE_TYPE(flags) != 0))
                                 ImScsiSyntaxHelp();
 
@@ -2245,8 +2247,8 @@ wmain(int argc, LPWSTR argv[])
                         }
                         else if (wcscmp(opt, L"buf") == 0)
                         {
-                            if (((IMSCSI_TYPE(flags) != IMSCSI_TYPE_FILE) &
-                                (IMSCSI_TYPE(flags) != 0)) |
+                            if (((IMSCSI_TYPE(flags) != IMSCSI_TYPE_FILE) &&
+                                (IMSCSI_TYPE(flags) != 0)) ||
                                 (IMSCSI_FILE_TYPE(flags) != 0))
                                 ImScsiSyntaxHelp();
 
@@ -2280,8 +2282,8 @@ wmain(int argc, LPWSTR argv[])
 
             case L'f':
             case L'F':
-                if ((op_mode != OP_MODE_CREATE) |
-                    (argc < 2) |
+                if ((op_mode != OP_MODE_CREATE) ||
+                    (argc < 2) ||
                     (file_name != NULL))
                     ImScsiSyntaxHelp();
 
@@ -2295,8 +2297,8 @@ wmain(int argc, LPWSTR argv[])
                 break;
 
             case L's':
-                if (((op_mode != OP_MODE_CREATE) & (op_mode != OP_MODE_EDIT)) |
-                    (argc < 2) |
+                if (((op_mode != OP_MODE_CREATE) && (op_mode != OP_MODE_EDIT)) ||
+                    (argc < 2) ||
                     (disk_geometry.QuadPart != 0))
                     ImScsiSyntaxHelp();
 
@@ -2311,7 +2313,7 @@ wmain(int argc, LPWSTR argv[])
                     case 0:
                         break;
                     case '%':
-                        if ((disk_geometry.QuadPart <= 0) |
+                        if ((disk_geometry.QuadPart <= 0) ||
                             (disk_geometry.QuadPart >= 100))
                             ImScsiSyntaxHelp();
 
@@ -2379,8 +2381,8 @@ wmain(int argc, LPWSTR argv[])
                 break;
 
             case L'S':
-                if ((op_mode != OP_MODE_CREATE) |
-                    (argc < 2) |
+                if ((op_mode != OP_MODE_CREATE) ||
+                    (argc < 2) ||
                     (bytes_per_sector != 0))
                     ImScsiSyntaxHelp();
 
@@ -2394,9 +2396,9 @@ wmain(int argc, LPWSTR argv[])
                 break;
 
             case L'b':
-                if ((op_mode != OP_MODE_CREATE) |
-                    (argc < 2) |
-                    (image_offset.QuadPart != 0) |
+                if ((op_mode != OP_MODE_CREATE) ||
+                    (argc < 2) ||
+                    (image_offset.QuadPart != 0) ||
                     (auto_find_offset != FALSE))
                     ImScsiSyntaxHelp();
 
@@ -2457,8 +2459,8 @@ wmain(int argc, LPWSTR argv[])
                 break;
 
             case L'p':
-                if ((op_mode != OP_MODE_CREATE) |
-                    (argc < 2) |
+                if ((op_mode != OP_MODE_CREATE) ||
+                    (argc < 2) ||
                     (format_options != NULL))
                     ImScsiSyntaxHelp();
 
@@ -2469,7 +2471,7 @@ wmain(int argc, LPWSTR argv[])
                 break;
 
             case L'P':
-                if ((op_mode != OP_MODE_CREATE) &
+                if ((op_mode != OP_MODE_CREATE) &&
                     (op_mode != OP_MODE_REMOVE))
                     ImScsiSyntaxHelp();
 
@@ -2478,7 +2480,7 @@ wmain(int argc, LPWSTR argv[])
                 break;
 
             case L'u':
-                if ((argc < 2) |
+                if ((argc < 2) ||
                     (device_number.LongNumber != IMSCSI_AUTO_DEVICE_NUMBER))
                     ImScsiSyntaxHelp();
 
@@ -2551,7 +2553,9 @@ wmain(int argc, LPWSTR argv[])
     case OP_MODE_QUERY:
         if ((device_number.LongNumber == IMSCSI_AUTO_DEVICE_NUMBER) &&
             (mount_point == NULL))
-            return !ImScsiCliQueryStatusDriver(numeric_print);
+        {
+            return ImScsiCliQueryStatusDriver(numeric_print);
+        }
 
         return ImScsiCliQueryStatusDevice(device_number, mount_point);
 

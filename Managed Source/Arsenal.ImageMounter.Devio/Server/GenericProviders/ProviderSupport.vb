@@ -1,7 +1,7 @@
 ﻿
 ''''' ProviderSupport.vb
 ''''' 
-''''' Copyright (c) 2012-2020, Arsenal Consulting, Inc. (d/b/a Arsenal Recon) <http://www.ArsenalRecon.com>
+''''' Copyright (c) 2012-2021, Arsenal Consulting, Inc. (d/b/a Arsenal Recon) <http://www.ArsenalRecon.com>
 ''''' This source code and API are available under the terms of the Affero General Public
 ''''' License v3.
 '''''
@@ -10,8 +10,15 @@
 ''''' Questions, comments, or requests for clarification: http://ArsenalRecon.com/contact/
 '''''
 
+Imports System.IO
 Imports System.Runtime.CompilerServices
+Imports System.Security.Cryptography
+Imports System.Threading
+Imports System.Threading.Tasks
+Imports Arsenal.ImageMounter.Devio.Server.SpecializedProviders
+Imports Arsenal.ImageMounter.Extensions
 Imports Arsenal.ImageMounter.IO
+Imports DiscUtils
 
 Namespace Server.GenericProviders
 
@@ -48,13 +55,16 @@ Namespace Server.GenericProviders
                 End If
 
                 Try
-                    foundfiles =
-                        Directory.GetFiles(dir_name, dir_pattern)
+                    foundfiles = Directory.GetFiles(dir_name, dir_pattern)
 
                 Catch ex As Exception
                     Throw New Exception($"Failed enumerating files '{dir_pattern}' in directory '{dir_name}'", ex)
 
                 End Try
+
+                For i = 0 To foundfiles.Length - 1
+                    foundfiles(i) = Path.GetFullPath(foundfiles(i))
+                Next
 
                 Array.Sort(foundfiles, StringComparer.Ordinal)
 
@@ -75,20 +85,18 @@ Namespace Server.GenericProviders
         End Function
 
         <Extension>
-        Public Sub ConvertToDiscUtilsImage(provider As IDevioProvider, outputImage As String, type As String, OutputImageVariant As String, cancel As CancellationToken)
+        Public Sub ConvertToDiscUtilsImage(provider As IDevioProvider, outputImage As String, type As String, OutputImageVariant As String, completionPosition As CompletionPosition, cancel As CancellationToken)
 
             Using builder = VirtualDisk.CreateDisk(type, OutputImageVariant, outputImage, provider.Length, Geometry.FromCapacity(provider.Length, CInt(provider.SectorSize)), Nothing)
 
-                Dim target = builder.Content
-
-                provider.WriteToSkipEmptyBlocks(target, ImageConversionIoBufferSize, cancel)
+                provider.WriteToSkipEmptyBlocks(builder.Content, ImageConversionIoBufferSize, skipWriteZeroBlocks:=True, hashResults:=Nothing, completionPosition:=completionPosition, cancel:=cancel)
 
             End Using
 
         End Sub
 
         <Extension>
-        Public Sub ConvertToRawImage(provider As IDevioProvider, outputImage As String, OutputImageVariant As String, cancel As CancellationToken)
+        Public Sub ConvertToRawImage(provider As IDevioProvider, outputImage As String, OutputImageVariant As String, completionPosition As CompletionPosition, cancel As CancellationToken)
 
             Using target As New FileStream(outputImage, FileMode.Create, FileAccess.Write, FileShare.Delete, ImageConversionIoBufferSize)
 
@@ -104,65 +112,146 @@ Namespace Server.GenericProviders
 
                 End If
 
-                provider.WriteToSkipEmptyBlocks(target, ImageConversionIoBufferSize, cancel)
+                provider.WriteToSkipEmptyBlocks(target, ImageConversionIoBufferSize, skipWriteZeroBlocks:=True, hashResults:=Nothing, completionPosition:=completionPosition, cancel:=cancel)
 
             End Using
 
         End Sub
 
         <Extension>
-        Public Sub WriteToSkipEmptyBlocks(source As IDevioProvider, target As Stream, buffersize As Integer, cancel As CancellationToken)
+        Public Sub WriteToPhysicalDisk(provider As IDevioProvider, outputDevice As String, completionPosition As CompletionPosition, cancel As CancellationToken)
 
-            '' 2 MB buffer
-            Dim buffer(0 To buffersize - 1) As Byte
+            Using target = NativeFileIO.OpenFileStream(outputDevice, FileMode.Open, FileAccess.ReadWrite, FileShare.Delete, ImageConversionIoBufferSize)
 
-            Dim count = 0
+                provider.WriteToSkipEmptyBlocks(target, ImageConversionIoBufferSize, skipWriteZeroBlocks:=False, hashResults:=Nothing, completionPosition:=completionPosition, cancel:=cancel)
 
-            Dim source_position = 0L
+            End Using
 
-            Do
+        End Sub
 
-                cancel.ThrowIfCancellationRequested()
+        <Extension>
+        Public Sub ConvertToLibEwfImage(provider As IDevioProvider, outputImage As String, completionPosition As CompletionPosition, cancel As CancellationToken)
 
-                Dim length_to_read = CInt(Math.Min(buffer.Length, source.Length - source_position))
+            Dim imaging_parameters As New DevioProviderLibEwf.ImagingParameters With {
+                .MediaSize = CULng(provider.Length),
+                .BytesPerSector = provider.SectorSize
+            }
 
-                If length_to_read = 0 Then
+            Dim physical_disk_handle = TryCast(TryCast(provider, DevioProviderFromStream)?.BaseStream, FileStream)?.SafeFileHandle
 
-                    Exit Do
+            If physical_disk_handle IsNot Nothing Then
+
+                Dim storageproperties = NativeFileIO.GetStorageStandardProperties(physical_disk_handle)
+                If storageproperties.HasValue Then
+
+                    imaging_parameters.StorageStandardProperties = storageproperties.Value
+                    Trace.WriteLine($"Source disk vendor '{imaging_parameters.StorageStandardProperties.VendorId}' model '{imaging_parameters.StorageStandardProperties.ProductId}', serial number '{imaging_parameters.StorageStandardProperties.SerialNumber}'")
 
                 End If
 
-                count = source.Read(buffer, 0, length_to_read, source_position)
+            End If
 
-                If count = 0 Then
+            Dim hashes As New Dictionary(Of String, Byte())(StringComparer.OrdinalIgnoreCase) From {
+                {"MD5", Nothing},
+                {"SHA1", Nothing},
+                {"SHA256", Nothing}
+            }
 
-                    Throw New IOException($"Read error, {length_to_read} bytes from {source_position}")
+            Using target As New DevioProviderLibEwf({Path.ChangeExtension(outputImage, Nothing)}, DevioProviderLibEwf.AccessFlagsWrite)
 
+                target.SetOutputParameters(imaging_parameters)
+
+                Using stream As New Client.DevioDirectStream(target, ownsProvider:=False)
+
+                    provider.WriteToSkipEmptyBlocks(stream, ImageConversionIoBufferSize, skipWriteZeroBlocks:=False, hashResults:=hashes, completionPosition:=completionPosition, cancel:=cancel)
+
+                End Using
+
+                For Each hash In hashes
+                    target.SetOutputHashParameter(hash.Key, hash.Value)
+                Next
+
+            End Using
+
+        End Sub
+
+        <Extension>
+        Public Sub WriteToSkipEmptyBlocks(source As IDevioProvider, target As Stream, buffersize As Integer, skipWriteZeroBlocks As Boolean, hashResults As Dictionary(Of String, Byte()), completionPosition As CompletionPosition, cancel As CancellationToken)
+
+            Using hashProviders As New DisposableDictionary(Of String, HashAlgorithm)(StringComparer.OrdinalIgnoreCase)
+
+                If hashResults IsNot Nothing Then
+                    For Each hashName In hashResults.Keys
+                        Dim hashProvider = HashAlgorithm.Create(hashName)
+                        hashProvider.Initialize()
+                        hashProviders.Add(hashName, hashProvider)
+                    Next
                 End If
 
-                source_position += count
+                Dim buffer(0 To buffersize - 1) As Byte
 
-                Const zero As Byte = 0
+                Dim count = 0
 
-                If Array.TrueForAll(buffer, AddressOf zero.Equals) Then
+                Dim source_position = 0L
 
-                    target.Seek(count, SeekOrigin.Current)
-
-                Else
+                Do
 
                     cancel.ThrowIfCancellationRequested()
 
-                    target.Write(buffer, 0, count)
+                    Dim length_to_read = CInt(Math.Min(buffer.Length, source.Length - source_position))
+
+                    If length_to_read = 0 Then
+
+                        Exit Do
+
+                    End If
+
+                    count = source.Read(buffer, 0, length_to_read, source_position)
+
+                    If count = 0 Then
+
+                        Throw New IOException($"Read error, {length_to_read} bytes from {source_position}")
+
+                    End If
+
+                    Parallel.ForEach(hashProviders.Values, Function(hashProvider) hashProvider.TransformBlock(buffer, 0, count, Nothing, 0))
+
+                    source_position += count
+
+                    If completionPosition IsNot Nothing Then
+                        completionPosition.LengthComplete = source_position
+                    End If
+
+                    If skipWriteZeroBlocks AndAlso buffer.IsBufferZero() Then
+
+                        target.Seek(count, SeekOrigin.Current)
+
+                    Else
+
+                        cancel.ThrowIfCancellationRequested()
+
+                        target.Write(buffer, 0, count)
+
+                    End If
+
+                Loop
+
+                If target.Length <> target.Position Then
+
+                    target.SetLength(target.Position)
 
                 End If
 
-            Loop
+                For Each hashProvider In hashProviders
+#If NET46_OR_GREATER OrElse NETCOREAPP OrElse NETSTANDARD Then
+                    hashProvider.Value.TransformFinalBlock(Array.Empty(Of Byte)(), 0, 0)
+#Else
+                    hashProvider.Value.TransformFinalBlock({}, 0, 0)
+#End If
+                    hashResults(hashProvider.Key) = hashProvider.Value.Hash
+                Next
 
-            If target.Length <> target.Position Then
-
-                target.SetLength(target.Position)
-
-            End If
+            End Using
 
         End Sub
 

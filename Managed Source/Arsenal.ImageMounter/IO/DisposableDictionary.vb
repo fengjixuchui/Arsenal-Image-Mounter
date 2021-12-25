@@ -11,24 +11,19 @@ Namespace IO
     <Serializable>
     Public Class DisposableDictionary(Of TKey, TValue As IDisposable)
         Inherits Dictionary(Of TKey, TValue)
-
         Implements IDisposable
-
-        Private disposedValue As Boolean    ' To detect redundant calls
 
         ' IDisposable
         Protected Overridable Sub Dispose(disposing As Boolean)
-            If Not Me.disposedValue Then
-                If disposing Then
-                    ' TODO: free managed resources when explicitly called
-                    For Each value In Values
-                        value?.Dispose()
-                    Next
-                End If
-            End If
-            Me.disposedValue = True
 
-            ' TODO: free shared unmanaged resources
+            If disposing Then
+                '' Dispose each object in list
+                For Each value In Values
+                    value?.Dispose()
+                Next
+            End If
+
+            '' Clear list
             Clear()
 
         End Sub

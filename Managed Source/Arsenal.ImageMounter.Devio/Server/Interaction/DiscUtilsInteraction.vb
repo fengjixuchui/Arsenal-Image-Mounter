@@ -1,7 +1,9 @@
-﻿Imports System.Security.AccessControl
+﻿Imports System.IO
 Imports System.Windows.Forms
 Imports Arsenal.ImageMounter.Extensions
 Imports Arsenal.ImageMounter.IO
+Imports DiscUtils
+Imports DiscUtils.Core.WindowsSecurity.AccessControl
 Imports DiscUtils.Partitions
 Imports Buffer = System.Buffer
 
@@ -16,9 +18,7 @@ Namespace Server.Interaction
         Private Sub New()
         End Sub
 
-        Shared Sub New()
-            DevioServiceFactory.Initialize()
-        End Sub
+        Public Shared ReadOnly Property DiscUtilsInitialized As Boolean = DevioServiceFactory.DiscUtilsInitialized
 
         Public Shared Sub InitializeVirtualDisk(disk As VirtualDisk, discutils_geometry As Geometry, partition_style As NativeFileIO.PARTITION_STYLE, file_system As InitializeFileSystem, label As String)
 
@@ -100,9 +100,7 @@ Namespace Server.Interaction
 
         Public Shared Function InteractiveCreateRAMDisk(adapter As ScsiAdapter) As RAMDiskService
 
-            Dim DeviceNumber As UInteger = ScsiAdapter.AutoDeviceNumber
-
-            Dim strsize = Microsoft.VisualBasic.InputBox("Enter size in MB", "RAM disk", "0")
+            Dim strsize = InputBox("Enter size in MB", "RAM disk", "0")
 
             Dim size_mb As Long
             If Not Long.TryParse(strsize, size_mb) Then
@@ -113,7 +111,7 @@ Namespace Server.Interaction
 
             If ramdisk.MountPoint IsNot Nothing Then
                 Try
-                    Process.Start(ramdisk.MountPoint)
+                    NativeFileIO.BrowseTo(ramdisk.MountPoint)
 
                 Catch ex As Exception
                     MessageBox.Show($"Failed to open Explorer window for created RAM disk: {ex.JoinMessages()}")

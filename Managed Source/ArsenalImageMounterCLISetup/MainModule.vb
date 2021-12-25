@@ -2,7 +2,7 @@
 ''''' MainModule.vb
 ''''' Console driver setup application, for scripting and similar.
 ''''' 
-''''' Copyright (c) 2012-2020, Arsenal Consulting, Inc. (d/b/a Arsenal Recon) <http://www.ArsenalRecon.com>
+''''' Copyright (c) 2012-2021, Arsenal Consulting, Inc. (d/b/a Arsenal Recon) <http://www.ArsenalRecon.com>
 ''''' This source code and API are available under the terms of the Affero General Public
 ''''' License v3.
 '''''
@@ -15,18 +15,17 @@ Imports Arsenal.ImageMounter.DriverSetup
 Imports Arsenal.ImageMounter.API
 Imports Arsenal.ImageMounter.IO
 Imports System.Windows.Forms
+Imports System.ComponentModel
+Imports System.Reflection
+Imports Arsenal.ImageMounter
 
-Module MainModule
+Public Module MainModule
 
-    Private ReadOnly ownerWindow As NativeWindow = NativeWindow.FromHandle(NativeFileIO.SafeNativeMethods.GetConsoleWindow())
+    Private ReadOnly ownerWindow As New NativeFileIO.NativeWindowHandle(NativeFileIO.SafeNativeMethods.GetConsoleWindow())
 
-    Sub New()
+    Public Function Main(ParamArray args As String()) As Integer
 
         Trace.Listeners.Add(New ConsoleTraceListener)
-
-    End Sub
-
-    Function Main(args As String()) As Integer
 
         Dim opMode As OpMode = OpMode.Status
 
@@ -56,7 +55,7 @@ Module MainModule
 
     End Function
 
-    Function SetupOperation(opMode As OpMode) As Integer
+    Public Function SetupOperation(opMode As OpMode) As Integer
 
         Trace.WriteLine($"Kernel type: {Kernel}")
         Trace.WriteLine($"Kernel supports StorPort: {HasStorPort}")
@@ -67,7 +66,7 @@ Module MainModule
                 Using zipStream = GetType(MainModule).Assembly.GetManifestResourceStream(
                         GetType(MainModule), "DriverFiles.zip")
 
-                    InstallFromZipFile(ownerWindow, zipStream)
+                    InstallFromZipStream(ownerWindow, zipStream)
 
                 End Using
 
@@ -123,7 +122,7 @@ Module MainModule
 
 End Module
 
-Enum OpMode
+Public Enum OpMode
     Install
     Uninstall
     Status

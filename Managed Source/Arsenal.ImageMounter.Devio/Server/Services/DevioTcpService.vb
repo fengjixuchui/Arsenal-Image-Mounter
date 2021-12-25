@@ -1,7 +1,7 @@
 ﻿
 ''''' DevioTcpService.vb
 ''''' 
-''''' Copyright (c) 2012-2020, Arsenal Consulting, Inc. (d/b/a Arsenal Recon) <http://www.ArsenalRecon.com>
+''''' Copyright (c) 2012-2021, Arsenal Consulting, Inc. (d/b/a Arsenal Recon) <http://www.ArsenalRecon.com>
 ''''' This source code and API are available under the terms of the Affero General Public
 ''''' License v3.
 '''''
@@ -10,6 +10,11 @@
 ''''' Questions, comments, or requests for clarification: http://ArsenalRecon.com/contact/
 '''''
 
+Imports System.IO
+Imports System.Net
+Imports System.Net.Sockets
+Imports System.Text
+Imports System.Threading
 Imports Arsenal.ImageMounter.Devio.IMDPROXY_CONSTANTS
 Imports Arsenal.ImageMounter.Devio.Server.GenericProviders
 
@@ -28,7 +33,7 @@ Namespace Server.Services
         ''' </summary>
         Public ReadOnly Property ListenEndPoint As IPEndPoint
 
-        Private InternalShutdownRequestAction As action
+        Private InternalShutdownRequestAction As Action
 
         ''' <summary>
         ''' Creates a new service instance with enough data to later run a service that acts as server end in Devio

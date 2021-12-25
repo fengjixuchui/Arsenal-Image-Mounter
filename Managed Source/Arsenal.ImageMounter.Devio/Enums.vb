@@ -2,7 +2,7 @@
 ''''' Enums.vb
 ''''' .NET definitions of the same enums and structures as in imdproxy.h
 ''''' 
-''''' Copyright (c) 2012-2020, Arsenal Consulting, Inc. (d/b/a Arsenal Recon) <http://www.ArsenalRecon.com>
+''''' Copyright (c) 2012-2021, Arsenal Consulting, Inc. (d/b/a Arsenal Recon) <http://www.ArsenalRecon.com>
 ''''' This source code and API are available under the terms of the Affero General Public
 ''''' License v3.
 '''''
@@ -12,6 +12,7 @@
 '''''
 
 Imports System.Diagnostics.CodeAnalysis
+Imports System.Runtime.InteropServices
 
 #Disable Warning CA1712
 
@@ -58,6 +59,8 @@ Public MustInherit Class IMDPROXY_CONSTANTS
     Public Const RESERVATION_KEY_ANY As ULong = ULong.MaxValue
 
 End Class
+
+#Disable Warning IDE1006 ' Naming Styles
 
 <StructLayout(LayoutKind.Sequential)>
 Public Structure IMDPROXY_CONNECT_REQ
@@ -134,7 +137,6 @@ Public Structure IMDPROXY_SCSI_REQ
     Private _cdb As Byte() 'byte[16]
     Public Property length As ULong
 
-    <SuppressMessage("Performance", "CA1819:Properties should not return arrays", Justification:="<Pending>")>
     Public Property Cdb As Byte()
         Get
             Return _cdb

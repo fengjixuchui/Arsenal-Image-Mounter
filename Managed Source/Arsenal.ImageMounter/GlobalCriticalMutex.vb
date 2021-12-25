@@ -2,7 +2,7 @@
 ''''' API for manipulating flag values, issuing SCSI bus rescans and similar
 ''''' tasks.
 ''''' 
-''''' Copyright (c) 2012-2020, Arsenal Consulting, Inc. (d/b/a Arsenal Recon) <http://www.ArsenalRecon.com>
+''''' Copyright (c) 2012-2021, Arsenal Consulting, Inc. (d/b/a Arsenal Recon) <http://www.ArsenalRecon.com>
 ''''' This source code and API are available under the terms of the Affero General Public
 ''''' License v3.
 '''''
@@ -11,6 +11,7 @@
 ''''' Questions, comments, or requests for clarification: http://ArsenalRecon.com/contact/
 '''''
 
+Imports System.Threading
 Imports Arsenal.ImageMounter.IO
 Imports Microsoft.Win32
 
@@ -49,7 +50,7 @@ Public NotInheritable Class GlobalCriticalMutex
     Private disposedValue As Boolean ' To detect redundant calls
 
     ' IDisposable
-    Protected Sub Dispose(disposing As Boolean)
+    Private Sub Dispose(disposing As Boolean)
         If Not disposedValue Then
             If disposing Then
                 mutex.ReleaseMutex()

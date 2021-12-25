@@ -1,7 +1,7 @@
 ﻿''''' DiskStream.vb
 ''''' Stream implementation for direct access to raw disk data.
 ''''' 
-''''' Copyright (c) 2012-2020, Arsenal Consulting, Inc. (d/b/a Arsenal Recon) <http://www.ArsenalRecon.com>
+''''' Copyright (c) 2012-2021, Arsenal Consulting, Inc. (d/b/a Arsenal Recon) <http://www.ArsenalRecon.com>
 ''''' This source code and API are available under the terms of the Affero General Public
 ''''' License v3.
 '''''
@@ -10,8 +10,9 @@
 ''''' Questions, comments, or requests for clarification: http://ArsenalRecon.com/contact/
 '''''
 
+Imports System.IO
 Imports Arsenal.ImageMounter.IO
-
+Imports Microsoft.Win32.SafeHandles
 
 ''' <summary>
 ''' A FileStream derived class that represents disk devices by overriding properties and methods
@@ -26,8 +27,8 @@ Public Class DiskStream
     ''' </summary>
     ''' <param name="SafeFileHandle">Open file handle for disk device.</param>
     ''' <param name="AccessMode">Access to request for stream.</param>
-    Protected Friend Sub New(SafeFileHandle As SafeFileHandle, AccessMode As FileAccess)
-        MyBase.New(SafeFileHandle, AccessMode)
+    Protected Friend Sub New(SafeFileHandle As SafeFileHandle, AccessMode As FileAccess, bufferSize As Integer)
+        MyBase.New(SafeFileHandle, AccessMode, bufferSize)
     End Sub
 
     Private _CachedLength As Long?
@@ -38,8 +39,8 @@ Public Class DiskStream
     ''' <param name="SafeFileHandle">Open file handle for disk device.</param>
     ''' <param name="AccessMode">Access to request for stream.</param>
     ''' <param name="DiskSize">Size that should be returned by Length property</param>
-    Protected Friend Sub New(SafeFileHandle As SafeFileHandle, AccessMode As FileAccess, DiskSize As Long)
-        MyBase.New(SafeFileHandle, AccessMode)
+    Protected Friend Sub New(SafeFileHandle As SafeFileHandle, AccessMode As FileAccess, bufferSize As Integer, DiskSize As Long)
+        MyBase.New(SafeFileHandle, AccessMode, bufferSize)
 
         _CachedLength = DiskSize
     End Sub
